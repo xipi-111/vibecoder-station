@@ -1,0 +1,288 @@
+:root {
+  color: #fff;
+  background: #111;
+  font-family:
+    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 340px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% -20%, #303030 0, transparent 48%),
+    #111;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.manager-shell {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.manager-titlebar {
+  display: flex;
+  min-height: 88px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 23px 20px 16px 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  -webkit-app-region: drag;
+}
+
+.manager-titlebar h1,
+.manager-titlebar p {
+  margin: 0;
+}
+
+.manager-titlebar h1 {
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.manager-titlebar p {
+  margin-top: 5px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+}
+
+.manager-close,
+.manager-add-form button,
+.manager-login,
+.manager-creator button {
+  border: 0;
+  color: rgba(255, 255, 255, 0.84);
+  background: rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  outline: none;
+  -webkit-app-region: no-drag;
+}
+
+.manager-close {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 999px;
+}
+
+.manager-close:hover,
+.manager-add-form button:hover:not(:disabled),
+.manager-login:hover:not(:disabled),
+.manager-creator button:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.manager-close:focus-visible,
+.manager-add-form button:focus-visible,
+.manager-login:focus-visible,
+.manager-creator button:focus-visible,
+.manager-add-form input:focus-visible {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.78);
+}
+
+.manager-content {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+}
+
+.manager-status-row {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.manager-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+}
+
+.manager-status-authenticated {
+  color: #9bd8ad;
+}
+
+.status-spinner {
+  animation: status-spin 900ms linear infinite;
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.manager-login {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.manager-add-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px;
+  gap: 9px;
+}
+
+.manager-add-form input {
+  min-width: 0;
+  height: 46px;
+  padding: 0 14px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.075);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 13px;
+  outline: none;
+}
+
+.manager-add-form input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.manager-add-form input:focus {
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.manager-add-form button {
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+}
+
+.manager-add-form button:disabled,
+.manager-login:disabled,
+.manager-creator button:disabled {
+  cursor: wait;
+  opacity: 0.42;
+}
+
+.manager-error {
+  margin: -4px 2px 0;
+  color: #ffaaa3;
+  font-size: 12px;
+}
+
+.manager-list {
+  display: grid;
+  min-height: 0;
+  align-content: start;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.manager-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.manager-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 99px;
+}
+
+.manager-creator {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px 9px 14px;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.035);
+  border-radius: 14px;
+}
+
+.manager-creator > div {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.manager-creator strong {
+  max-width: 275px;
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manager-creator span {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11px;
+}
+
+.manager-creator button {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 11px;
+}
+
+.manager-empty {
+  display: grid;
+  min-height: 180px;
+  place-content: center;
+  text-align: center;
+}
+
+.manager-empty p,
+.manager-empty span {
+  margin: 0;
+}
+
+.manager-empty p {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.manager-empty span {
+  margin-top: 6px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-spinner {
+    animation: none;
+  }
+}

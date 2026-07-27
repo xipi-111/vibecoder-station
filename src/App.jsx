@@ -4,12 +4,9 @@ import {
   GearSix,
   Pause,
   Play,
-  Plus,
   SkipForward,
-  SignIn,
   SpeakerHigh,
   SpeakerSlash,
-  Trash,
   UsersThree,
   X,
 } from "@phosphor-icons/react";
@@ -125,13 +122,6 @@ export function App() {
   const [speed, setSpeed] = useState(1);
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [douyinStatus, setDouyinStatus] = useState(null);
-  const [loginBusy, setLoginBusy] = useState(false);
-  const [creatorPanelOpen, setCreatorPanelOpen] = useState(false);
-  const [creators, setCreators] = useState([]);
-  const [creatorInput, setCreatorInput] = useState("");
-  const [creatorBusy, setCreatorBusy] = useState(false);
-  const [creatorError, setCreatorError] = useState("");
   const activeStream = videoSlots[activeSlot];
 
   const clearHideTimer = useCallback(() => {
@@ -151,7 +141,6 @@ export function App() {
     hideTimerRef.current = window.setTimeout(() => {
       setControlsVisible(false);
       setSpeedMenuOpen(false);
-      setCreatorPanelOpen(false);
     }, HIDE_DELAY_MS);
   }, [clearHideTimer]);
 
@@ -332,46 +321,6 @@ export function App() {
     });
   }, [activeSlot, activeStream?.id, prefetchNext]);
 
-  useEffect(() => {
-    if (!streamProvider.isDesktop) return undefined;
-    let active = true;
-
-    const updateStatus = () => {
-      streamProvider
-        .getDouyinStatus()
-        .then((status) => {
-          if (active) setDouyinStatus(status);
-        })
-        .catch((error) => {
-          console.error("[douyin] 无法读取登录状态", error);
-        });
-    };
-
-    updateStatus();
-    const timer = window.setInterval(updateStatus, 4_000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  const loadCreators = useCallback(() => {
-    if (!streamProvider.isDesktop) return Promise.resolve();
-    return streamProvider
-      .listCreators()
-      .then((result) => {
-        setCreators(result.creators ?? []);
-        return result;
-      })
-      .catch((error) => {
-        console.error("[creators] 无法读取博主配置", error);
-      });
-  }, []);
-
-  useEffect(() => {
-    loadCreators();
-  }, [loadCreators]);
-
   const handleMediaLoaded = useCallback((slotIndex) => {
     const media = mediaElementsRef.current[slotIndex];
     const surface = surfaceElementsRef.current[slotIndex];
@@ -413,7 +362,6 @@ export function App() {
 
     switchingRef.current = true;
     setSpeedMenuOpen(false);
-    setCreatorPanelOpen(false);
 
     try {
       const prefetched = await prefetchNext(
@@ -577,74 +525,12 @@ export function App() {
     setSpeedMenuOpen(false);
   }, []);
 
-  const loginDouyin = useCallback(async () => {
-    if (loginBusy) return;
-    setLoginBusy(true);
-    try {
-      const status = await streamProvider.loginDouyin();
-      setDouyinStatus(status);
-    } catch (error) {
-      console.error("[douyin] 登录失败", error);
-    } finally {
-      setLoginBusy(false);
-    }
-  }, [loginBusy]);
-
-  const toggleCreatorPanel = useCallback(() => {
+  const openCreatorManager = useCallback(() => {
     setSpeedMenuOpen(false);
-    setCreatorError("");
-    setCreatorPanelOpen((open) => {
-      if (!open) loadCreators();
-      return !open;
+    streamProvider.openCreatorManager().catch((error) => {
+      console.error("[creators] 无法打开博主管理窗口", error);
     });
-  }, [loadCreators]);
-
-  const addCreator = useCallback(
-    async (event) => {
-      event.preventDefault();
-      const value = creatorInput.trim();
-      if (!value || creatorBusy) return;
-
-      setCreatorBusy(true);
-      setCreatorError("");
-      try {
-        const result = await streamProvider.addCreator(value);
-        setCreators(result.creators ?? []);
-        setCreatorInput("");
-        setDouyinStatus(await streamProvider.getDouyinStatus());
-        const currentSlot = activeSlotRef.current;
-        if (!slotsRef.current[currentSlot]) {
-          setSlotStream(
-            currentSlot,
-            await streamProvider.getInitial(),
-          );
-        }
-      } catch (error) {
-        setCreatorError(error?.message ?? "添加博主失败");
-      } finally {
-        setCreatorBusy(false);
-      }
-    },
-    [creatorBusy, creatorInput, setSlotStream],
-  );
-
-  const removeCreator = useCallback(
-    async (secUid) => {
-      if (creatorBusy) return;
-      setCreatorBusy(true);
-      setCreatorError("");
-      try {
-        const result = await streamProvider.removeCreator(secUid);
-        setCreators(result.creators ?? []);
-        setDouyinStatus(await streamProvider.getDouyinStatus());
-      } catch (error) {
-        setCreatorError(error?.message ?? "删除博主失败");
-      } finally {
-        setCreatorBusy(false);
-      }
-    },
-    [creatorBusy],
-  );
+  }, []);
 
   return (
     <main className="stage">
@@ -669,8 +555,7 @@ export function App() {
               <IconButton
                 className="player-control corner-control utility-control"
                 label="管理博主"
-                aria-expanded={creatorPanelOpen}
-                onClick={toggleCreatorPanel}
+                onClick={openCreatorManager}
               >
                 <UsersThree size={27} weight="regular" />
               </IconButton>
@@ -809,81 +694,6 @@ export function App() {
           ) : null,
         )}
 
-        {creatorPanelOpen ? (
-          <section
-            className="player-control corner-control creator-panel"
-            aria-label="博主管理"
-          >
-            <div className="creator-panel-header">
-              <div>
-                <strong>博主</strong>
-                <span>
-                  {creators.length} 个 · 作品{" "}
-                  {douyinStatus?.catalogCount ?? "同步中"}
-                </span>
-              </div>
-              <button
-                className="panel-close-button"
-                type="button"
-                aria-label="关闭博主管理"
-                onClick={() => setCreatorPanelOpen(false)}
-              >
-                <X size={18} weight="bold" />
-              </button>
-            </div>
-
-            <form className="creator-add-form" onSubmit={addCreator}>
-              <input
-                value={creatorInput}
-                disabled={creatorBusy}
-                placeholder="粘贴抖音博主主页分享链接"
-                aria-label="抖音博主主页分享链接"
-                onChange={(event) => setCreatorInput(event.target.value)}
-              />
-              <button
-                type="submit"
-                disabled={creatorBusy || !creatorInput.trim()}
-                aria-label="添加博主"
-              >
-                <Plus size={20} weight="bold" />
-              </button>
-            </form>
-
-            {creatorError ? (
-              <p className="creator-error" role="alert">
-                {creatorError}
-              </p>
-            ) : null}
-
-            <div className="creator-list">
-              {creators.length ? (
-                creators.map((creator) => (
-                  <div className="creator-row" key={creator.secUid}>
-                    <div>
-                      <strong>{creator.name || "抖音博主"}</strong>
-                      <span>{creator.secUid.slice(-8)}</span>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={creatorBusy}
-                      aria-label={`删除 ${creator.name || "博主"}`}
-                      onClick={() => removeCreator(creator.secUid)}
-                    >
-                      <Trash size={18} weight="regular" />
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <p className="creator-empty">还没有配置博主</p>
-              )}
-            </div>
-
-            {creatorBusy ? (
-              <p className="creator-working">正在识别并同步作品…</p>
-            ) : null}
-          </section>
-        ) : null}
-
         <div className="primary-actions" aria-label="主要播放控制">
           <IconButton
             className="player-control primary-control"
@@ -906,19 +716,6 @@ export function App() {
         </div>
 
         <div className="bottom-left-controls">
-          {douyinStatus?.available &&
-          douyinStatus.authRequired &&
-          !douyinStatus.authenticated ? (
-            <IconButton
-              className="player-control corner-control login-control"
-              label="登录抖音以加载全部作品"
-              disabled={loginBusy}
-              onClick={loginDouyin}
-            >
-              <SignIn size={24} weight="regular" />
-              <span>{loginBusy ? "等待登录" : "登录抖音"}</span>
-            </IconButton>
-          ) : null}
           <IconButton
             className="player-control corner-control utility-control"
             label={muted ? "打开声音" : "静音"}

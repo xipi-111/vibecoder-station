@@ -67,6 +67,14 @@ export const streamProvider = {
     return true;
   },
 
+  async openCreatorManager() {
+    const bridge = desktopBridge();
+    if (!bridge?.openCreatorManager) {
+      throw new Error("仅桌面应用支持独立博主管理窗口");
+    }
+    return bridge.openCreatorManager();
+  },
+
   async listCreators() {
     const bridge = desktopBridge();
     return bridge?.listCreators

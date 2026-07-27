@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld(
   Object.freeze({
     platform: process.platform,
     closeWindow: () => ipcRenderer.invoke("window:close"),
+    openCreatorManager: () => ipcRenderer.invoke("creators:open-manager"),
     getInitialStream: () => ipcRenderer.invoke("stream:get-initial"),
     getNextStream: (currentId) =>
       ipcRenderer.invoke("stream:get-next", String(currentId ?? "")),

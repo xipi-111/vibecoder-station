@@ -24,3 +24,5 @@ When implementing from a selected generated mock, treat that image as the source
 - Treat a creator catalog as complete only after pagination returns `has_more=false`. Guest-mode partial results may play, but the hover-only login action must clearly unlock the complete catalog.
 - Treat Douyin image posts as first-class works: play their original soundtrack while advancing through the images, using the same controls and two-surface transition as videos.
 - In creator management, show the total work count alongside the creator count so catalog growth is visible without adding permanent player chrome.
+- Creator management lives in a separate, single-instance, draggable and resizable utility window. It remembers its bounds, does not cover or interrupt playback, and closing it hides only that utility window.
+- For this repository, use the `git` and `gh` CLIs for GitHub operations instead of connector write actions.
