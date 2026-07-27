@@ -118,6 +118,9 @@ class MediaTransport {
       poster: item.posterMedia
         ? normalizeRemoteDescriptor(item.posterMedia)
         : current.poster ?? null,
+      images: item.imageMedia
+        ? item.imageMedia.map(normalizeRemoteDescriptor)
+        : current.images ?? [],
     });
   }
 
@@ -133,31 +136,53 @@ class MediaTransport {
     if (entry) entry.video = null;
   }
 
-  async resolveVideo(videoId, force = false) {
-    const entry = this.entries.get(videoId) ?? {};
-    if (!force && entry.video && !isExpired(entry.video)) {
-      return entry.video;
-    }
-
+  async refreshEntry(videoId) {
     if (!this.resolverClient.enabled) {
-      throw new Error(`本地目录中不存在视频：${videoId}`);
+      throw new Error(`本地目录中不存在作品：${videoId}`);
     }
 
-    if (!force && this.pendingResolutions.has(videoId)) {
+    if (this.pendingResolutions.has(videoId)) {
       return this.pendingResolutions.get(videoId);
     }
 
     const pending = this.resolverClient
       .resolve(videoId)
       .then((result) => {
-        const descriptor = normalizeRemoteDescriptor(result);
-        this.entries.set(videoId, { ...entry, video: descriptor });
-        return descriptor;
+        this.registerItem(result);
+        return this.entries.get(videoId);
       })
       .finally(() => this.pendingResolutions.delete(videoId));
 
     this.pendingResolutions.set(videoId, pending);
     return pending;
+  }
+
+  async resolveVideo(videoId, force = false) {
+    const entry = this.entries.get(videoId) ?? {};
+    if (!force && entry.video && !isExpired(entry.video)) {
+      return entry.video;
+    }
+
+    const refreshed = await this.refreshEntry(videoId);
+    if (!refreshed?.video) {
+      throw new Error(`作品 ${videoId} 没有可播放的音视频`);
+    }
+    return refreshed.video;
+  }
+
+  async resolveImage(videoId, imageIndex, force = false) {
+    const entry = this.entries.get(videoId) ?? {};
+    const descriptor = entry.images?.[imageIndex];
+    if (!force && descriptor && !isExpired(descriptor)) {
+      return descriptor;
+    }
+
+    const refreshed = await this.refreshEntry(videoId);
+    const image = refreshed?.images?.[imageIndex];
+    if (!image) {
+      throw new Error(`图文作品 ${videoId} 不存在第 ${imageIndex + 1} 张图片`);
+    }
+    return image;
   }
 
   async localFileResponse(filePath, request) {
@@ -220,7 +245,7 @@ class MediaTransport {
     return headers;
   }
 
-  async remoteResponse(videoId, descriptor, request, mayRetry = true) {
+  async remoteResponse(descriptor, request, refreshDescriptor = null) {
     const response = await net.fetch(descriptor.url, {
       method: request.method === "HEAD" ? "HEAD" : "GET",
       headers: this.buildUpstreamHeaders(descriptor, request),
@@ -229,10 +254,9 @@ class MediaTransport {
       bypassCustomProtocolHandlers: true,
     });
 
-    if (mayRetry && RETRYABLE_STATUS.has(response.status)) {
-      this.invalidate(videoId);
-      const refreshed = await this.resolveVideo(videoId, true);
-      return this.remoteResponse(videoId, refreshed, request, false);
+    if (refreshDescriptor && RETRYABLE_STATUS.has(response.status)) {
+      const refreshed = await refreshDescriptor();
+      return this.remoteResponse(refreshed, request);
     }
 
     return response;
@@ -245,30 +269,50 @@ class MediaTransport {
       }
 
       const { host, pathname } = new URL(request.url);
-      if (host !== "stream" && host !== "poster") {
+      if (host !== "stream" && host !== "poster" && host !== "image") {
         return errorResponse(404, "未知媒体类型");
       }
 
-      const videoId = decodeURIComponent(pathname.replace(/^\/+/, ""));
+      const pathParts = pathname
+        .replace(/^\/+/, "")
+        .split("/")
+        .map((part) => decodeURIComponent(part));
+      const videoId = pathParts[0];
       if (!videoId || videoId.includes("/")) {
-        return errorResponse(400, "无效的视频 ID");
+        return errorResponse(400, "无效的作品 ID");
       }
 
       const entry = this.entries.get(videoId);
-      const descriptor =
-        host === "poster" ? entry?.poster : await this.resolveVideo(videoId);
+      let descriptor;
+      let refreshDescriptor = null;
+      if (host === "stream") {
+        descriptor = await this.resolveVideo(videoId);
+        refreshDescriptor = () => {
+          this.invalidate(videoId);
+          return this.resolveVideo(videoId, true);
+        };
+      } else if (host === "image") {
+        const imageIndex = Number(pathParts[1]);
+        if (
+          pathParts.length !== 2 ||
+          !Number.isSafeInteger(imageIndex) ||
+          imageIndex < 0
+        ) {
+          return errorResponse(400, "无效的图片序号");
+        }
+        descriptor = await this.resolveImage(videoId, imageIndex);
+        refreshDescriptor = () =>
+          this.resolveImage(videoId, imageIndex, true);
+      } else {
+        descriptor = entry?.poster;
+      }
 
       if (!descriptor) return errorResponse(404, "媒体资源不存在");
       if (descriptor.localPath) {
         return this.localFileResponse(descriptor.localPath, request);
       }
 
-      return this.remoteResponse(
-        videoId,
-        descriptor,
-        request,
-        host === "stream",
-      );
+      return this.remoteResponse(descriptor, request, refreshDescriptor);
     } catch (error) {
       if (error?.name === "AbortError") {
         return errorResponse(499, "媒体请求已取消");

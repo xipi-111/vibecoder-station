@@ -22,3 +22,5 @@ When implementing from a selected generated mock, treat that image as the source
 - Upstream Douyin URLs, cookies, authorization headers, and refresh tokens stay in the Electron main process or the resolver backend. The renderer only receives `vibecoder-media://` URLs.
 - The built-in Douyin source may use an app-owned persistent session. Never import, inspect, or copy the user's Chrome cookies.
 - Treat a creator catalog as complete only after pagination returns `has_more=false`. Guest-mode partial results may play, but the hover-only login action must clearly unlock the complete catalog.
+- Treat Douyin image posts as first-class works: play their original soundtrack while advancing through the images, using the same controls and two-surface transition as videos.
+- In creator management, show the total work count alongside the creator count so catalog growth is visible without adding permanent player chrome.

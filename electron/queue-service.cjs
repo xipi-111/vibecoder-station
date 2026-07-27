@@ -30,7 +30,15 @@ function publicItem(item) {
     authorId: item.authorId ?? null,
     publishedAt: item.publishedAt ?? null,
     priority: item.priority ?? "shuffle",
-    streamUrl: `vibecoder-media://stream/${encodeURIComponent(item.id)}`,
+    kind: item.kind ?? "video",
+    durationMs: item.durationMs ?? null,
+    streamUrl: item.media
+      ? `vibecoder-media://stream/${encodeURIComponent(item.id)}`
+      : undefined,
+    imageUrls: (item.imageMedia ?? []).map(
+      (_image, index) =>
+        `vibecoder-media://image/${encodeURIComponent(item.id)}/${index}`,
+    ),
     posterUrl:
       item.posterUrl ??
       (item.posterFile || item.posterMedia
@@ -58,9 +66,18 @@ class QueueService {
   }
 
   async fromResolver(afterId) {
-    const item = await this.resolverClient.next(afterId);
-    if (!item?.id) throw new Error("队列接口没有返回 id");
+    const queuedItem = await this.resolverClient.next(afterId);
+    if (!queuedItem?.id) throw new Error("队列接口没有返回 id");
 
+    const resolvedItem =
+      queuedItem.media &&
+      (queuedItem.kind !== "image" || queuedItem.imageMedia?.length)
+        ? queuedItem
+        : {
+            ...queuedItem,
+            ...(await this.resolverClient.resolve(queuedItem.id)),
+          };
+    const item = { ...queuedItem, ...resolvedItem };
     this.mediaTransport.registerItem(item);
     return publicItem(item);
   }

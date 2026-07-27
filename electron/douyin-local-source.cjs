@@ -65,9 +65,49 @@ function getPlayUrl(aweme) {
   return firstHttpsUrl(aweme?.video?.download_addr?.url_list);
 }
 
+function isImagePost(aweme) {
+  return (
+    Number(aweme?.aweme_type) === 68 ||
+    (Array.isArray(aweme?.images) && aweme.images.length > 0)
+  );
+}
+
+function getImageUrls(aweme) {
+  const urls = [];
+  const seen = new Set();
+
+  for (const image of aweme?.images ?? []) {
+    const url =
+      firstHttpsUrl(image?.url_list) ??
+      firstHttpsUrl(image?.download_url_list);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    urls.push(url);
+  }
+
+  return urls;
+}
+
+function getMusicUrl(aweme) {
+  return firstHttpsUrl(aweme?.music?.play_url?.url_list);
+}
+
 function inferExpiry(url) {
   try {
-    const segments = new URL(url).pathname.split("/");
+    const parsed = new URL(url);
+    const queryExpiry = Number(
+      parsed.searchParams.get("x-expires") ??
+        parsed.searchParams.get("expires"),
+    );
+    if (
+      Number.isFinite(queryExpiry) &&
+      queryExpiry * 1_000 > Date.now() &&
+      queryExpiry * 1_000 < Date.now() + 365 * 24 * 60 * 60 * 1_000
+    ) {
+      return queryExpiry * 1_000;
+    }
+
+    const segments = parsed.pathname.split("/");
     const hexTimestamp = segments.find((segment) =>
       /^[0-9a-f]{8}$/i.test(segment),
     );
@@ -518,6 +558,14 @@ class DouyinLocalSource {
                   authorId: aweme.author?.sec_uid || "",
                   authorName: aweme.author?.nickname || "",
                   createTime: aweme.create_time || null,
+                  kind:
+                    Number(aweme.aweme_type) === 68 ||
+                    (Array.isArray(aweme.images) && aweme.images.length > 0)
+                      ? "image"
+                      : "video",
+                  imageCount: Array.isArray(aweme.images)
+                    ? aweme.images.length
+                    : 0,
                 })),
               };
             })()`,
@@ -533,6 +581,8 @@ class DouyinLocalSource {
               url: `https://www.douyin.com/video/${video.id}`,
               title: video.title,
               authorName: video.authorName,
+              kind: video.kind,
+              imageCount: video.imageCount,
               publishedAt: video.createTime
                 ? new Date(video.createTime * 1_000).toISOString()
                 : null,
@@ -572,17 +622,10 @@ class DouyinLocalSource {
 
   async resolve(videoId) {
     const aweme = await this.loadVideoDetail(videoId);
-    const mediaUrl = getPlayUrl(aweme);
-    if (!mediaUrl) {
-      throw new Error(`作品 ${videoId} 没有可播放的公开 MP4 地址`);
-    }
-
-    const coverUrl = firstHttpsUrl(aweme?.video?.cover?.url_list);
     const headers = {
       Referer: "https://www.douyin.com/",
     };
-
-    return {
+    const common = {
       id: aweme.aweme_id,
       title: aweme.desc ?? "",
       authorName: aweme.author?.nickname ?? "",
@@ -590,6 +633,51 @@ class DouyinLocalSource {
       publishedAt: aweme.create_time
         ? new Date(aweme.create_time * 1_000).toISOString()
         : null,
+    };
+
+    if (isImagePost(aweme)) {
+      const imageUrls = getImageUrls(aweme);
+      const musicUrl = getMusicUrl(aweme);
+      if (!imageUrls.length) {
+        throw new Error(`图文作品 ${videoId} 没有可显示的图片`);
+      }
+      if (!musicUrl) {
+        throw new Error(`图文作品 ${videoId} 没有可播放的原声`);
+      }
+
+      const imageMedia = imageUrls.map((url) => ({
+        url,
+        mimeType: "image/webp",
+        expiresAt: inferExpiry(url),
+        headers,
+      }));
+
+      return {
+        ...common,
+        kind: "image",
+        durationMs:
+          Number(aweme?.music?.duration ?? aweme?.music?.audition_duration) *
+            1_000 || null,
+        media: {
+          url: musicUrl,
+          mimeType: "audio/mpeg",
+          expiresAt: inferExpiry(musicUrl),
+          headers,
+        },
+        imageMedia,
+        posterMedia: imageMedia[0],
+      };
+    }
+
+    const mediaUrl = getPlayUrl(aweme);
+    if (!mediaUrl) {
+      throw new Error(`作品 ${videoId} 没有可播放的公开 MP4 地址`);
+    }
+
+    const coverUrl = firstHttpsUrl(aweme?.video?.cover?.url_list);
+    return {
+      ...common,
+      kind: "video",
       media: {
         url: mediaUrl,
         mimeType: "video/mp4",
@@ -613,6 +701,9 @@ module.exports = {
   DouyinLoginRequiredError,
   assertVideoId,
   extractProfileInput,
+  getImageUrls,
+  getMusicUrl,
   inferExpiry,
+  isImagePost,
   uniqueVideoLinks,
 };
