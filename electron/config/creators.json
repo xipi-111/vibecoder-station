@@ -1,0 +1,18 @@
+{
+  "pollIntervalMinutes": 15,
+  "creators": [
+    {
+      "name": "AAA麟西",
+      "secUid": "MS4wLjABAAAAk-iM4HsNctFlBevUMddcdHUuQ2hRuy-dSxoboS2j1mIC48MkfFC8uJ9yQC3v7FNL",
+      "shareUrl": "https://v.douyin.com/ADLDPcmuWHU/"
+    }
+  ],
+  "seedVideos": [
+    {
+      "id": "7665159402169023419",
+      "authorName": "AAA麟西",
+      "authorId": "MS4wLjABAAAAk-iM4HsNctFlBevUMddcdHUuQ2hRuy-dSxoboS2j1mIC48MkfFC8uJ9yQC3v7FNL",
+      "shareUrl": "https://v.douyin.com/s48wEoJsJEE/"
+    }
+  ]
+}
