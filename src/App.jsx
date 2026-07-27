@@ -32,20 +32,20 @@ function IconButton({ label, className = "", children, ...props }) {
   );
 }
 
-function waitForPlayable(video, timeoutMs = 15_000) {
-  if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+function waitForPlayable(media, timeoutMs = 15_000) {
+  if (media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
     return Promise.resolve();
   }
 
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => {
       cleanup();
-      reject(new Error("下一条视频缓冲超时"));
+      reject(new Error("下一条作品缓冲超时"));
     }, timeoutMs);
     const cleanup = () => {
       window.clearTimeout(timeout);
-      video.removeEventListener("canplay", onCanPlay);
-      video.removeEventListener("error", onError);
+      media.removeEventListener("canplay", onCanPlay);
+      media.removeEventListener("error", onError);
     };
     const onCanPlay = () => {
       cleanup();
@@ -53,11 +53,40 @@ function waitForPlayable(video, timeoutMs = 15_000) {
     };
     const onError = () => {
       cleanup();
-      reject(new Error("下一条视频加载失败"));
+      reject(new Error("下一条作品加载失败"));
     };
 
-    video.addEventListener("canplay", onCanPlay, { once: true });
-    video.addEventListener("error", onError, { once: true });
+    media.addEventListener("canplay", onCanPlay, { once: true });
+    media.addEventListener("error", onError, { once: true });
+  });
+}
+
+function waitForImage(image, timeoutMs = 15_000) {
+  if (!image || (image.complete && image.naturalWidth > 0)) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("下一条图文图片加载超时"));
+    }, timeoutMs);
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      image.removeEventListener("load", onLoad);
+      image.removeEventListener("error", onError);
+    };
+    const onLoad = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("下一条图文图片加载失败"));
+    };
+
+    image.addEventListener("load", onLoad, { once: true });
+    image.addEventListener("error", onError, { once: true });
   });
 }
 
@@ -69,7 +98,9 @@ function nextPaint() {
 
 export function App() {
   const rootRef = useRef(null);
-  const videoElementsRef = useRef([null, null]);
+  const surfaceElementsRef = useRef([null, null]);
+  const mediaElementsRef = useRef([null, null]);
+  const imageElementsRef = useRef([null, null]);
   const slotsRef = useRef([
     streamProvider.getPlaceholder(),
     null,
@@ -90,6 +121,7 @@ export function App() {
   const [playing, setPlaying] = useState(true);
   const [muted, setMuted] = useState(true);
   const [progress, setProgress] = useState(0);
+  const [imageIndexes, setImageIndexes] = useState([0, 0]);
   const [speed, setSpeed] = useState(1);
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -285,7 +317,7 @@ export function App() {
         if (active) setSlotStream(0, initialStream);
       })
       .catch((error) => {
-        console.error("[stream] 无法取得首个视频", error);
+        console.error("[stream] 无法取得首个作品", error);
       });
 
     return () => {
@@ -296,7 +328,7 @@ export function App() {
   useEffect(() => {
     if (!activeStream?.id) return;
     prefetchNext(activeStream.id, 1 - activeSlot).catch((error) => {
-      console.error("[stream] 无法预载下一个视频", error);
+      console.error("[stream] 无法预载下一个作品", error);
     });
   }, [activeSlot, activeStream?.id, prefetchNext]);
 
@@ -340,22 +372,28 @@ export function App() {
     loadCreators();
   }, [loadCreators]);
 
-  const handleVideoLoaded = useCallback((slotIndex) => {
-    const video = videoElementsRef.current[slotIndex];
-    if (!video) return;
+  const handleMediaLoaded = useCallback((slotIndex) => {
+    const media = mediaElementsRef.current[slotIndex];
+    const surface = surfaceElementsRef.current[slotIndex];
+    if (!media || !surface) return;
 
     const settings = playbackSettingsRef.current;
-    video.playbackRate = settings.speed;
-    video.muted = settings.muted;
+    media.playbackRate = settings.speed;
+    media.muted = settings.muted;
 
     if (slotIndex === activeSlotRef.current) {
-      utils.set(video, { y: "0%", opacity: 1 });
-      video.play().catch(() => setPlaying(false));
+      utils.set(surface, { y: "0%", opacity: 1 });
+      media.play().catch(() => setPlaying(false));
       setPlaying(true);
     } else {
-      video.pause();
-      video.currentTime = 0;
-      utils.set(video, { y: "100%", opacity: 1 });
+      media.pause();
+      media.currentTime = 0;
+      utils.set(surface, { y: "100%", opacity: 1 });
+      setImageIndexes((current) => {
+        const next = [...current];
+        next[slotIndex] = 0;
+        return next;
+      });
     }
   }, []);
 
@@ -363,11 +401,12 @@ export function App() {
     if (switchingRef.current) return;
     const currentSlot = activeSlotRef.current;
     const currentStream = slotsRef.current[currentSlot];
-    const currentVideo = videoElementsRef.current[currentSlot];
-    if (!currentStream || !currentVideo) return;
+    const currentMedia = mediaElementsRef.current[currentSlot];
+    const currentSurface = surfaceElementsRef.current[currentSlot];
+    if (!currentStream || !currentMedia || !currentSurface) return;
 
     const targetSlot = 1 - currentSlot;
-    const shouldResume = !currentVideo.paused && !currentVideo.ended;
+    const shouldResume = !currentMedia.paused && !currentMedia.ended;
     const reducedMotion = window.matchMedia(
       "(prefers-reduced-motion: reduce)",
     ).matches;
@@ -383,25 +422,38 @@ export function App() {
       );
       await nextPaint();
 
-      const nextVideo = videoElementsRef.current[prefetched.targetSlot];
-      if (!nextVideo) throw new Error("下一条视频元素尚未就绪");
-      await waitForPlayable(nextVideo);
+      const nextMedia = mediaElementsRef.current[prefetched.targetSlot];
+      const nextSurface = surfaceElementsRef.current[prefetched.targetSlot];
+      if (!nextMedia || !nextSurface) {
+        throw new Error("下一条作品元素尚未就绪");
+      }
+      await Promise.all([
+        waitForPlayable(nextMedia),
+        prefetched.nextStream.kind === "image"
+          ? waitForImage(imageElementsRef.current[prefetched.targetSlot])
+          : Promise.resolve(),
+      ]);
 
       const settings = playbackSettingsRef.current;
-      nextVideo.currentTime = 0;
-      nextVideo.playbackRate = settings.speed;
-      nextVideo.muted = settings.muted;
-      utils.set(nextVideo, { y: "100%", opacity: 1 });
-      currentVideo.pause();
-      await nextVideo.play();
+      nextMedia.currentTime = 0;
+      nextMedia.playbackRate = settings.speed;
+      nextMedia.muted = settings.muted;
+      setImageIndexes((current) => {
+        const next = [...current];
+        next[prefetched.targetSlot] = 0;
+        return next;
+      });
+      utils.set(nextSurface, { y: "100%", opacity: 1 });
+      currentMedia.pause();
+      await nextMedia.play();
 
       if (reducedMotion) {
-        utils.set(currentVideo, { y: "-100%" });
-        utils.set(nextVideo, { y: "0%" });
+        utils.set(currentSurface, { y: "-100%" });
+        utils.set(nextSurface, { y: "0%" });
       } else {
         await Promise.all([
           new Promise((resolve) => {
-            animate(currentVideo, {
+            animate(currentSurface, {
               y: "-100%",
               duration: 420,
               ease: "inOut(3)",
@@ -409,7 +461,7 @@ export function App() {
             });
           }),
           new Promise((resolve) => {
-            animate(nextVideo, {
+            animate(nextSurface, {
               y: "0%",
               duration: 420,
               ease: "inOut(3)",
@@ -423,20 +475,23 @@ export function App() {
       setActiveSlot(prefetched.targetSlot);
       setProgress(0);
       setPlaying(true);
-      currentVideo.currentTime = 0;
+      currentMedia.currentTime = 0;
       if (prefetchRef.current?.afterId === currentStream.id) {
         prefetchRef.current = null;
       }
     } catch (error) {
-      console.error("[stream] 无法切换到下一个视频", error);
-      utils.set(currentVideo, { y: "0%", opacity: 1 });
-      const nextVideo = videoElementsRef.current[targetSlot];
-      if (nextVideo) {
-        nextVideo.pause();
-        utils.set(nextVideo, { y: "100%", opacity: 1 });
+      console.error("[stream] 无法切换到下一个作品", error);
+      utils.set(currentSurface, { y: "0%", opacity: 1 });
+      const nextMedia = mediaElementsRef.current[targetSlot];
+      const nextSurface = surfaceElementsRef.current[targetSlot];
+      if (nextMedia) {
+        nextMedia.pause();
+      }
+      if (nextSurface) {
+        utils.set(nextSurface, { y: "100%", opacity: 1 });
       }
       if (shouldResume) {
-        currentVideo
+        currentMedia
           .play()
           .then(() => setPlaying(true))
           .catch(() => setPlaying(false));
@@ -449,26 +504,24 @@ export function App() {
   }, [prefetchNext]);
 
   const togglePlayback = useCallback(() => {
-    const video =
-      videoElementsRef.current[activeSlotRef.current];
-    if (!video) return;
+    const media = mediaElementsRef.current[activeSlotRef.current];
+    if (!media) return;
 
-    if (video.paused) {
-      video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+    if (media.paused) {
+      media.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
     } else {
-      video.pause();
+      media.pause();
       setPlaying(false);
     }
   }, []);
 
   const toggleMute = useCallback(() => {
-    const activeVideo =
-      videoElementsRef.current[activeSlotRef.current];
-    if (!activeVideo) return;
-    const nextMuted = !activeVideo.muted;
+    const activeMedia = mediaElementsRef.current[activeSlotRef.current];
+    if (!activeMedia) return;
+    const nextMuted = !activeMedia.muted;
     playbackSettingsRef.current.muted = nextMuted;
-    for (const video of videoElementsRef.current) {
-      if (video) video.muted = nextMuted;
+    for (const media of mediaElementsRef.current) {
+      if (media) media.muted = nextMuted;
     }
     setMuted(nextMuted);
   }, []);
@@ -481,29 +534,44 @@ export function App() {
     }
   }, []);
 
-  const updateProgress = useCallback((slotIndex, video) => {
+  const updateProgress = useCallback((slotIndex, media) => {
     if (
       slotIndex !== activeSlotRef.current ||
-      !video?.duration
+      !media?.duration
     ) {
       return;
     }
-    setProgress((video.currentTime / video.duration) * 100);
+    const nextProgress = media.currentTime / media.duration;
+    setProgress(nextProgress * 100);
+
+    const stream = slotsRef.current[slotIndex];
+    const imageCount = stream?.imageUrls?.length ?? 0;
+    if (stream?.kind === "image" && imageCount > 1) {
+      const nextImageIndex = Math.min(
+        imageCount - 1,
+        Math.floor(nextProgress * imageCount),
+      );
+      setImageIndexes((current) => {
+        if (current[slotIndex] === nextImageIndex) return current;
+        const next = [...current];
+        next[slotIndex] = nextImageIndex;
+        return next;
+      });
+    }
   }, []);
 
   const seek = useCallback((event) => {
-    const video =
-      videoElementsRef.current[activeSlotRef.current];
-    if (!video?.duration) return;
+    const media = mediaElementsRef.current[activeSlotRef.current];
+    if (!media?.duration) return;
     const nextProgress = Number(event.target.value);
-    video.currentTime = (nextProgress / 100) * video.duration;
+    media.currentTime = (nextProgress / 100) * media.duration;
     setProgress(nextProgress);
   }, []);
 
   const selectSpeed = useCallback((nextSpeed) => {
     playbackSettingsRef.current.speed = nextSpeed;
-    for (const video of videoElementsRef.current) {
-      if (video) video.playbackRate = nextSpeed;
+    for (const media of mediaElementsRef.current) {
+      if (media) media.playbackRate = nextSpeed;
     }
     setSpeed(nextSpeed);
     setSpeedMenuOpen(false);
@@ -621,18 +689,12 @@ export function App() {
 
         {videoSlots.map((slotStream, slotIndex) =>
           slotStream ? (
-            <video
+            <div
               ref={(node) => {
-                videoElementsRef.current[slotIndex] = node;
+                surfaceElementsRef.current[slotIndex] = node;
               }}
-              key={`video-slot-${slotIndex}`}
-              className="video-surface"
-              src={slotStream.streamUrl}
-              poster={slotStream.posterUrl}
-              autoPlay={slotIndex === activeSlot}
-              muted={muted}
-              playsInline
-              preload="auto"
+              key={`work-slot-${slotIndex}`}
+              className="work-surface"
               aria-hidden={slotIndex !== activeSlot}
               style={{
                 transform: `translateY(${
@@ -645,32 +707,105 @@ export function App() {
               onClick={
                 slotIndex === activeSlot ? togglePlayback : undefined
               }
-              onLoadedData={() => handleVideoLoaded(slotIndex)}
-              onTimeUpdate={(event) =>
-                updateProgress(slotIndex, event.currentTarget)
-              }
-              onEnded={
-                slotIndex === activeSlot ? playNext : undefined
-              }
-              onPlay={() => {
-                if (slotIndex === activeSlotRef.current) {
-                  setPlaying(true);
-                }
-              }}
-              onPause={() => {
-                if (
-                  slotIndex === activeSlotRef.current &&
-                  !switchingRef.current
-                ) {
-                  setPlaying(false);
-                }
-              }}
               aria-label={
                 slotIndex === activeSlot
-                  ? "当前播放视频"
-                  : "已预载的下一个视频"
+                  ? "当前播放作品"
+                  : "已预载的下一个作品"
               }
-            />
+            >
+              {slotStream.kind === "image" ? (
+                <>
+                  <img
+                    key={`image-backdrop-${slotStream.imageUrls[
+                      imageIndexes[slotIndex] ?? 0
+                    ]}`}
+                    className="image-backdrop"
+                    src={
+                      slotStream.imageUrls[imageIndexes[slotIndex] ?? 0]
+                    }
+                    alt=""
+                    aria-hidden="true"
+                  />
+                  <img
+                    ref={(node) => {
+                      imageElementsRef.current[slotIndex] = node;
+                    }}
+                    key={`image-${slotStream.imageUrls[
+                      imageIndexes[slotIndex] ?? 0
+                    ]}`}
+                    className="image-surface"
+                    src={
+                      slotStream.imageUrls[imageIndexes[slotIndex] ?? 0]
+                    }
+                    alt="抖音图文作品"
+                  />
+                  <audio
+                    ref={(node) => {
+                      mediaElementsRef.current[slotIndex] = node;
+                    }}
+                    className="work-audio"
+                    src={slotStream.streamUrl}
+                    autoPlay={slotIndex === activeSlot}
+                    muted={muted}
+                    preload="auto"
+                    onLoadedData={() => handleMediaLoaded(slotIndex)}
+                    onTimeUpdate={(event) =>
+                      updateProgress(slotIndex, event.currentTarget)
+                    }
+                    onEnded={
+                      slotIndex === activeSlot ? playNext : undefined
+                    }
+                    onPlay={() => {
+                      if (slotIndex === activeSlotRef.current) {
+                        setPlaying(true);
+                      }
+                    }}
+                    onPause={() => {
+                      if (
+                        slotIndex === activeSlotRef.current &&
+                        !switchingRef.current
+                      ) {
+                        setPlaying(false);
+                      }
+                    }}
+                  />
+                </>
+              ) : (
+                <video
+                  ref={(node) => {
+                    mediaElementsRef.current[slotIndex] = node;
+                    imageElementsRef.current[slotIndex] = null;
+                  }}
+                  className="video-surface"
+                  src={slotStream.streamUrl}
+                  poster={slotStream.posterUrl}
+                  autoPlay={slotIndex === activeSlot}
+                  muted={muted}
+                  playsInline
+                  preload="auto"
+                  onLoadedData={() => handleMediaLoaded(slotIndex)}
+                  onTimeUpdate={(event) =>
+                    updateProgress(slotIndex, event.currentTarget)
+                  }
+                  onEnded={
+                    slotIndex === activeSlot ? playNext : undefined
+                  }
+                  onPlay={() => {
+                    if (slotIndex === activeSlotRef.current) {
+                      setPlaying(true);
+                    }
+                  }}
+                  onPause={() => {
+                    if (
+                      slotIndex === activeSlotRef.current &&
+                      !switchingRef.current
+                    ) {
+                      setPlaying(false);
+                    }
+                  }}
+                />
+              )}
+            </div>
           ) : null,
         )}
 
@@ -682,7 +817,10 @@ export function App() {
             <div className="creator-panel-header">
               <div>
                 <strong>博主</strong>
-                <span>{creators.length} 个</span>
+                <span>
+                  {creators.length} 个 · 作品{" "}
+                  {douyinStatus?.catalogCount ?? "同步中"}
+                </span>
               </div>
               <button
                 className="panel-close-button"
@@ -760,7 +898,7 @@ export function App() {
           </IconButton>
           <IconButton
             className="player-control primary-control"
-            label="下一个视频"
+            label="下一个作品"
             onClick={playNext}
           >
             <SkipForward size={43} weight="fill" />
@@ -833,7 +971,7 @@ export function App() {
 
         <div className="player-control progress-control">
           <input
-            aria-label="视频进度"
+            aria-label="作品进度"
             type="range"
             min="0"
             max="100"

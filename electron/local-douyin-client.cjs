@@ -358,6 +358,7 @@ class LocalDouyinClient {
       id: item.id,
       authorId: item.authorId ?? null,
       publishedAt: item.publishedAt ?? null,
+      kind: item.kind ?? null,
       priority,
     };
   }
@@ -370,6 +371,7 @@ class LocalDouyinClient {
       authorName: result.authorName,
       authorId: result.authorId,
       publishedAt: result.publishedAt,
+      kind: result.kind,
     });
     return result;
   }

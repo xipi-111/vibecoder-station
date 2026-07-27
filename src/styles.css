@@ -91,19 +91,67 @@ button {
   background: rgba(186, 42, 42, 0.86);
 }
 
-.video-surface {
+.work-surface {
   position: absolute;
   inset: 0;
   z-index: 0;
-  display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  overflow: hidden;
   cursor: default;
   background: #0b0b0b;
   backface-visibility: hidden;
   contain: paint;
   will-change: transform;
+}
+
+.video-surface,
+.image-backdrop,
+.image-surface {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+}
+
+.video-surface {
+  object-fit: cover;
+  background: #0b0b0b;
+}
+
+.image-backdrop {
+  object-fit: cover;
+  opacity: 0.58;
+  filter: blur(28px) saturate(0.92);
+  transform: scale(1.12);
+}
+
+.image-surface {
+  z-index: 1;
+  object-fit: contain;
+  animation: image-arrive 240ms ease-out;
+}
+
+.work-audio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@keyframes image-arrive {
+  from {
+    opacity: 0.2;
+    transform: scale(1.012);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .primary-actions {
@@ -500,5 +548,9 @@ button {
   .icon-button,
   .speed-menu {
     transition-duration: 0ms;
+  }
+
+  .image-surface {
+    animation: none;
   }
 }

@@ -1,9 +1,10 @@
 # VibeCoder 加油站
 
-macOS 与 Windows 通用的极简竖屏视频播放器。鼠标不在窗口内时只有视频；移入后
+macOS 与 Windows 通用的极简竖屏作品播放器。视频直接播放；抖音图文作品会自动
+轮播图片并播放原声。鼠标不在窗口内时只有作品内容；移入后
 才显示播放、下一条、静音、倍速、全屏、关闭窗口、博主管理与进度控制。
 
-播放器常驻两路视频元素：当前视频播放时就在后台预载下一条；切换前等待下一条
+播放器常驻两路作品画面：当前作品播放时就在后台预载下一条；切换前等待下一条
 达到可播放状态，并保留当前最后一帧，随后用整屏向上的推入/推出动画完成交接。
 网络变慢时不会为了等待下一条而提前露出黑底。系统开启“减少动态效果”时会改为
 无位移的即时切换。
@@ -17,7 +18,7 @@ npm run dev:desktop
 
 默认不需要另建解析服务。应用会读取
 [`electron/config/creators.json`](electron/config/creators.json)，在隔离的 Electron
-会话中检查博主作品，并在播放时解析公开作品的临时 MP4 地址。
+会话中检查博主作品，并在播放时解析公开作品的视频，或图文图片与原声地址。
 
 鼠标移入视频后，左上角的博主按钮可以直接粘贴抖音主页分享链接并增删博主。
 修改后的配置保存在应用数据目录的 `douyin-creators.json`，升级或重新打包不会
@@ -38,7 +39,7 @@ npm run dev:desktop
 
 ## 媒体链路
 
-`video 元素 → vibecoder-media:// → Electron 主进程 → 抖音 CDN`
+`video/audio/img 元素 → vibecoder-media:// → Electron 主进程 → 抖音 CDN`
 
 主进程会转发 Range、透传 206 响应、按需附带 Referer，并在临时地址失效时重新
 解析。真实 CDN 地址和会话信息不会进入 React 渲染层。
@@ -49,6 +50,7 @@ npm run dev:desktop
 npm run test:douyin-catalog
 npm run test:douyin-creator
 npm run test:douyin
+npm run test:douyin-image
 npm run test:config
 npm run test:transport
 ```
