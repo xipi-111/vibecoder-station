@@ -200,6 +200,11 @@ export function ManagerApp() {
   const collectionLabel = pluginUi.collectionLabel ?? "集合";
   const collectionPluralLabel =
     pluginUi.collectionPluralLabel ?? collectionLabel;
+  const authenticationStatusLabel = authenticated
+    ? pluginUi.authenticatedStatusLabel ?? "已登录"
+    : pluginUi.guestStatusLabel ?? "未登录";
+  const blockingSourceStatus =
+    verificationRequired || (throttled && !catalogCached);
   const canInspectSource =
     throttled &&
     !verificationRequired &&
@@ -307,14 +312,14 @@ export function ManagerApp() {
             <div className="manager-status-row">
               <div
                 className={`manager-status ${
-                  verificationRequired || throttled
+                  blockingSourceStatus
                     ? "manager-status-verification"
                     : authenticated
                       ? "manager-status-authenticated"
                       : ""
                 }`}
               >
-                {verificationRequired || throttled ? (
+                {blockingSourceStatus ? (
                   <ShieldCheck size={18} weight="fill" />
                 ) : refreshing ? (
                   <SpinnerGap className="status-spinner" size={18} />
@@ -331,11 +336,9 @@ export function ManagerApp() {
                     ? syncingLabel
                     : throttled
                       ? catalogCached
-                        ? `本地目录可用 · 约 ${nextCatalogCheckMinutes} 分钟后检查更新`
+                        ? `${authenticationStatusLabel} · 本地目录可用 · 约 ${nextCatalogCheckMinutes} 分钟后检查更新`
                         : `抖音限流，约 ${retryMinutes} 分钟后重试`
-                    : authenticated
-                      ? pluginUi.authenticatedStatusLabel ?? "已登录"
-                      : pluginUi.guestStatusLabel ?? "未登录"}
+                    : authenticationStatusLabel}
                 </span>
               </div>
 
