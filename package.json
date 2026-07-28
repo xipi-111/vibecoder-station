@@ -1,6 +1,6 @@
 {
   "name": "vibecoder-station",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A minimal cross-platform desktop video player for the VibeCoder station.",
   "author": "xipi-111",
   "license": "MIT",
@@ -26,6 +26,7 @@
     "test:douyin-image": "electron electron/douyin-image-smoke.cjs",
     "test:douyin": "electron electron/douyin-source-smoke.cjs",
     "test:config": "node electron/local-douyin-config-smoke.cjs",
+    "test:catalog-cache": "node electron/local-douyin-catalog-cache-smoke.cjs",
     "test:ordering": "node electron/local-douyin-ordering-smoke.cjs",
     "test:rate-limit": "node electron/local-douyin-rate-limit-smoke.cjs",
     "test:scaling": "node electron/local-douyin-scaling-smoke.cjs",

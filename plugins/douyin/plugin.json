@@ -2,7 +2,7 @@
   "apiVersion": 1,
   "id": "com.vibecoder.douyin",
   "name": "抖音内容源",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "从用户配置的抖音博主中同步作品并提供连续播放。",
   "main": "main.cjs",
   "capabilities": {

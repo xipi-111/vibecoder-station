@@ -174,12 +174,21 @@ export function ManagerApp() {
   const throttled = Boolean(status?.throttled);
   const verificationRequired = Boolean(status?.verificationRequired);
   const verificationAvailable = Boolean(status?.verificationAvailable);
+  const catalogCached = Boolean(
+    status?.catalogCached && Number(status?.catalogCount) > 0,
+  );
   const sourceWindowOpen = Boolean(
     status?.sourceWindowOpen ?? status?.verificationWindowOpen,
   );
   const retryMinutes = Math.max(
     1,
     Math.ceil((Number(status?.retryInMs) || 0) / 60_000),
+  );
+  const nextCatalogCheckMinutes = Math.max(
+    retryMinutes,
+    Math.ceil(
+      (Number(status?.nextCatalogCheckInMs) || 0) / 60_000,
+    ),
   );
   const catalogCount = status?.catalogCount;
   const syncProcessed = Number(status?.syncProcessed) || 0;
@@ -194,6 +203,7 @@ export function ManagerApp() {
   const canInspectSource =
     throttled &&
     !verificationRequired &&
+    !catalogCached &&
     Boolean(status?.inspectionAvailable ?? verificationAvailable);
   const authenticationActionVisible =
     selectedPlugin?.capabilities?.authentication &&
@@ -320,7 +330,9 @@ export function ManagerApp() {
                     : refreshing
                     ? syncingLabel
                     : throttled
-                      ? `抖音限流，约 ${retryMinutes} 分钟后重试`
+                      ? catalogCached
+                        ? `本地目录可用 · 约 ${nextCatalogCheckMinutes} 分钟后检查更新`
+                        : `抖音限流，约 ${retryMinutes} 分钟后重试`
                     : authenticated
                       ? pluginUi.authenticatedStatusLabel ?? "已登录"
                       : pluginUi.guestStatusLabel ?? "未登录"}

@@ -1,7 +1,9 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
-const DEFAULT_POLL_MINUTES = 15;
+const DEFAULT_POLL_MINUTES = 180;
+const LEGACY_POLL_MINUTES = 15;
+const CATALOG_SCHEMA_VERSION = 1;
 const MAX_RECENT_ITEMS = 20;
 const FAST_SYNC_CREATOR_THRESHOLD = 12;
 const FAST_SYNC_PAGE_LIMIT = 1;
@@ -31,6 +33,37 @@ function randomItem(values) {
   return values[Math.floor(Math.random() * values.length)];
 }
 
+function normalizeTimestamp(candidate) {
+  return typeof candidate === "string" &&
+    Number.isFinite(Date.parse(candidate))
+    ? candidate
+    : null;
+}
+
+function serializeCatalogItem(item) {
+  const id = String(item?.id ?? "");
+  if (!/^\d{10,24}$/.test(id)) return null;
+  const serialized = { id };
+  for (const key of [
+    "authorName",
+    "authorId",
+    "publishedAt",
+    "kind",
+    "shareUrl",
+  ]) {
+    if (typeof item?.[key] === "string" && item[key]) {
+      serialized[key] = item[key];
+    }
+  }
+  if (
+    Number.isInteger(item?.imageCount) &&
+    item.imageCount >= 0
+  ) {
+    serialized.imageCount = item.imageCount;
+  }
+  return serialized;
+}
+
 function emptyRateLimitState() {
   return {
     consecutiveFailures: 0,
@@ -54,18 +87,14 @@ function normalizeRateLimitState(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return fallback;
   }
-  const timestamp = (candidate) =>
-    typeof candidate === "string" && Number.isFinite(Date.parse(candidate))
-      ? candidate
-      : null;
   const count = (candidate) =>
     Number.isInteger(candidate) && candidate >= 0 ? candidate : 0;
   return {
     consecutiveFailures: count(value.consecutiveFailures),
-    nextRetryAt: timestamp(value.nextRetryAt),
-    lastAttemptAt: timestamp(value.lastAttemptAt),
-    lastSuccessAt: timestamp(value.lastSuccessAt),
-    lastThrottleAt: timestamp(value.lastThrottleAt),
+    nextRetryAt: normalizeTimestamp(value.nextRetryAt),
+    lastAttemptAt: normalizeTimestamp(value.lastAttemptAt),
+    lastSuccessAt: normalizeTimestamp(value.lastSuccessAt),
+    lastThrottleAt: normalizeTimestamp(value.lastThrottleAt),
     lastErrorKind:
       typeof value.lastErrorKind === "string"
         ? value.lastErrorKind
@@ -98,6 +127,7 @@ class LocalDouyinClient {
     this.config = config;
     this.configPath = configPath;
     this.statePath = path.join(userDataPath, "douyin-queue-state.json");
+    this.catalogPath = path.join(userDataPath, "douyin-catalog.json");
     this.now = now;
     this.random = random;
     this.items = new Map();
@@ -109,8 +139,13 @@ class LocalDouyinClient {
       catalogCompleteCreatorIds: [],
       refreshCursor: 0,
       catalogTransport: "api",
+      catalogImportedAt: null,
+      lastCatalogCheckAt: null,
       rateLimit: emptyRateLimitState(),
     };
+    this.catalogLoaded = false;
+    this.catalogUpdatedAt = null;
+    this.catalogSaveOperation = Promise.resolve();
     this.initialization = null;
     this.refreshPromise = null;
     this.pollTimer = null;
@@ -160,6 +195,105 @@ class LocalDouyinClient {
     );
   }
 
+  effectivePollMinutes() {
+    const configuredMinutes = Number(this.config.pollIntervalMinutes);
+    if (configuredMinutes === LEGACY_POLL_MINUTES) {
+      return DEFAULT_POLL_MINUTES;
+    }
+    return Number.isFinite(configuredMinutes) && configuredMinutes > 0
+      ? configuredMinutes
+      : DEFAULT_POLL_MINUTES;
+  }
+
+  catalogRefreshDelayRemaining() {
+    const lastCheckAt = Date.parse(
+      this.state.lastCatalogCheckAt ?? "",
+    );
+    if (!Number.isFinite(lastCheckAt)) return 0;
+    return Math.max(
+      0,
+      lastCheckAt +
+        this.effectivePollMinutes() * 60 * 1_000 -
+        this.now(),
+    );
+  }
+
+  async loadCatalog() {
+    try {
+      const stored = JSON.parse(
+        await fs.readFile(this.catalogPath, "utf8"),
+      );
+      if (
+        stored?.schemaVersion !== CATALOG_SCHEMA_VERSION ||
+        !Array.isArray(stored.items)
+      ) {
+        throw new Error("本地目录版本不受支持");
+      }
+      const activeCreatorIds = new Set(
+        (this.config.creators ?? []).map((creator) => creator.secUid),
+      );
+      for (const candidate of stored.items) {
+        const item = serializeCatalogItem(candidate);
+        if (
+          !item ||
+          (item.authorId && !activeCreatorIds.has(item.authorId))
+        ) {
+          continue;
+        }
+        this.items.set(item.id, {
+          ...this.items.get(item.id),
+          ...item,
+          rank: Number.MAX_SAFE_INTEGER,
+        });
+      }
+      this.catalogLoaded = true;
+      this.catalogUpdatedAt = normalizeTimestamp(stored.updatedAt);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        console.warn(
+          "[douyin-queue] 无法读取本地作品目录，将从旧状态恢复",
+          error,
+        );
+      }
+    }
+  }
+
+  async saveCatalog() {
+    const save = async () => {
+      const updatedAt = this.timestamp();
+      const items = [...this.items.values()]
+        .map(serializeCatalogItem)
+        .filter(Boolean)
+        .sort(compareVideoIdsDescending);
+      await fs.mkdir(path.dirname(this.catalogPath), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        this.catalogPath,
+        JSON.stringify(
+          {
+            schemaVersion: CATALOG_SCHEMA_VERSION,
+            updatedAt,
+            creators: (this.config.creators ?? []).map((creator) => ({
+              name: creator.name,
+              secUid: creator.secUid,
+              shareUrl: creator.shareUrl,
+            })),
+            items,
+          },
+          null,
+          2,
+        ),
+        { mode: 0o600 },
+      );
+      this.catalogLoaded = true;
+      this.catalogUpdatedAt = updatedAt;
+    };
+    const result = this.catalogSaveOperation.then(save, save);
+    this.catalogSaveOperation = result.catch(() => undefined);
+    return result;
+  }
+
   async resetCatalog() {
     this.items.clear();
     for (const item of this.activeSeedVideos()) {
@@ -176,12 +310,15 @@ class LocalDouyinClient {
         this.state.catalogTransport === "profile_page"
           ? "profile_page"
           : "api",
+      catalogImportedAt: this.state.catalogImportedAt,
+      lastCatalogCheckAt: null,
       rateLimit: normalizeRateLimitState(this.state.rateLimit),
     };
     this.authRequired = false;
     this.partialCount = 0;
     this.lastRefreshError = null;
     await this.saveState();
+    await this.saveCatalog();
   }
 
   async loadState() {
@@ -211,6 +348,10 @@ class LocalDouyinClient {
           stored.catalogTransport === "profile_page"
             ? "profile_page"
             : "api",
+        catalogImportedAt: normalizeTimestamp(stored.catalogImportedAt),
+        lastCatalogCheckAt: normalizeTimestamp(
+          stored.lastCatalogCheckAt,
+        ),
         rateLimit: normalizeRateLimitState(stored.rateLimit),
       };
 
@@ -244,10 +385,43 @@ class LocalDouyinClient {
 
     this.initialization = (async () => {
       await this.loadState();
+      await this.loadCatalog();
+
+      let configChanged = false;
+      let stateChanged = false;
+      if (
+        Number(this.config.pollIntervalMinutes) === LEGACY_POLL_MINUTES
+      ) {
+        this.config.pollIntervalMinutes = DEFAULT_POLL_MINUTES;
+        configChanged = true;
+      }
+      if (!this.catalogLoaded && this.state.knownIds.length > 0) {
+        const importedAt = this.timestamp();
+        this.state.catalogImportedAt =
+          this.state.catalogImportedAt ?? importedAt;
+        this.state.lastCatalogCheckAt =
+          this.state.lastCatalogCheckAt ?? importedAt;
+        stateChanged = true;
+        await this.saveCatalog();
+      } else if (
+        this.catalogLoaded &&
+        !this.state.lastCatalogCheckAt &&
+        this.catalogUpdatedAt
+      ) {
+        this.state.lastCatalogCheckAt = this.catalogUpdatedAt;
+        stateChanged = true;
+      }
+      if (configChanged) await this.saveConfig();
+      if (stateChanged) await this.saveState();
 
       const retryDelay = this.rateLimitDelayRemaining();
-      if (retryDelay > 0) {
-        this.scheduleSliceRefresh(retryDelay);
+      const catalogDelay = this.catalogRefreshDelayRemaining();
+      if (this.state.rateLimit?.verificationRequired) {
+        this.beginHumanVerification();
+      } else if (retryDelay > 0 || catalogDelay > 0) {
+        this.scheduleSliceRefresh(
+          Math.max(retryDelay, catalogDelay),
+        );
       } else {
         this.refresh().catch((error) => {
           console.warn(
@@ -429,7 +603,11 @@ class LocalDouyinClient {
     ];
   }
 
-  async refresh({ ignoreBackoff = false } = {}) {
+  async refresh({
+    ignoreBackoff = false,
+    onlyCreators = null,
+    fullCatalog = false,
+  } = {}) {
     if (this.refreshPromise) return this.refreshPromise;
     if (
       !ignoreBackoff &&
@@ -451,7 +629,19 @@ class LocalDouyinClient {
 
     this.refreshPromise = (async () => {
       const configuredCreators = this.config.creators ?? [];
+      const targeted = Array.isArray(onlyCreators);
+      const requestedCreatorIds = new Set(
+        targeted
+          ? onlyCreators.map((creator) => creator.secUid)
+          : [],
+      );
+      const scopedCreators = targeted
+        ? configuredCreators.filter((creator) =>
+            requestedCreatorIds.has(creator.secUid),
+          )
+        : configuredCreators;
       const fastSync =
+        !targeted &&
         configuredCreators.length >= FAST_SYNC_CREATOR_THRESHOLD;
       const storedCursor = fastSync
         ? Math.min(
@@ -464,7 +654,7 @@ class LocalDouyinClient {
             storedCursor,
             storedCursor + FAST_SYNC_BATCH_SIZE,
           )
-        : configuredCreators;
+        : scopedCreators;
       const known = new Set(this.state.knownIds);
       const pending = new Set(this.state.pendingNewIds);
       const creatorHighWaterMarks = {
@@ -484,8 +674,10 @@ class LocalDouyinClient {
       let configChanged = false;
       let throttled = false;
       let processedCreatorCount = creators.length;
-      this.syncProcessed = storedCursor;
-      this.syncTotal = configuredCreators.length;
+      this.syncProcessed = targeted ? 0 : storedCursor;
+      this.syncTotal = targeted
+        ? scopedCreators.length
+        : configuredCreators.length;
 
       const registerResult = (creator, videos) => {
         configChanged =
@@ -518,6 +710,7 @@ class LocalDouyinClient {
           catalogCompleteCreatorIds,
         });
         await this.saveState();
+        await this.saveCatalog();
       };
 
       if (
@@ -606,15 +799,19 @@ class LocalDouyinClient {
       } else {
         for (const creator of creators) {
           try {
+            const needsInitialCatalog =
+              !this.state.catalogImportedAt &&
+              !creatorHighWaterMarks[creator.secUid] &&
+              !catalogCompleteCreatorIds.has(creator.secUid);
             const videos = await this.source.fetchCreatorVideos(
               creator,
-              fastSync
-                ? {
+              fullCatalog || needsInitialCatalog
+                ? undefined
+                : {
                     maxPages: FAST_SYNC_PAGE_LIMIT,
                     stopAfterId:
                       creatorHighWaterMarks[creator.secUid] ?? null,
-                  }
-                : undefined,
+                  },
             );
             registerResult(creator, videos);
             this.recordBatchTelemetry([
@@ -650,7 +847,7 @@ class LocalDouyinClient {
             registerFailure(creator, error);
           } finally {
             if (!throttled) this.syncProcessed += 1;
-            if (fastSync) {
+            if (fastSync || targeted) {
               await persistProgress();
             }
           }
@@ -674,11 +871,12 @@ class LocalDouyinClient {
       this.authRequired = authRequired;
       this.partialCount = partialCount;
       this.lastRefreshError = lastRefreshError?.message ?? null;
+      let reachedEnd = false;
       if (fastSync) {
         const advancedBy = throttled
           ? processedCreatorCount
           : creators.length;
-        const reachedEnd =
+        reachedEnd =
           storedCursor + advancedBy >= configuredCreators.length;
         this.state.refreshCursor = throttled
           ? storedCursor + advancedBy
@@ -686,8 +884,20 @@ class LocalDouyinClient {
             ? 0
             : storedCursor + advancedBy;
       }
+      if (
+        !targeted &&
+        !throttled &&
+        !lastRefreshError &&
+        (!fastSync || reachedEnd)
+      ) {
+        const completedAt = this.timestamp();
+        this.state.catalogImportedAt =
+          this.state.catalogImportedAt ?? completedAt;
+        this.state.lastCatalogCheckAt = completedAt;
+      }
       if (configChanged) await this.saveConfig();
       await this.saveState();
+      await this.saveCatalog();
 
       if (this.state.rateLimit.verificationRequired) {
         this.beginHumanVerification(
@@ -833,6 +1043,10 @@ class LocalDouyinClient {
       totalSuccesses: rateLimit.totalSuccesses,
       totalThrottles: rateLimit.totalThrottles,
       catalogTransport: this.state.catalogTransport ?? "api",
+      catalogCached: this.catalogLoaded,
+      catalogUpdatedAt: this.catalogUpdatedAt,
+      lastCatalogCheckAt: this.state.lastCatalogCheckAt,
+      nextCatalogCheckInMs: this.catalogRefreshDelayRemaining(),
       syncProcessed: this.syncProcessed,
       syncTotal: this.syncTotal,
       completeCreatorCount:
@@ -885,6 +1099,7 @@ class LocalDouyinClient {
   }
 
   async addCreator(input) {
+    await this.initialize();
     if (this.refreshPromise) await this.refreshPromise;
     const creator = await this.source.resolveCreatorProfile(input);
     const existing = (this.config.creators ?? []).find(
@@ -896,12 +1111,15 @@ class LocalDouyinClient {
 
     this.config.creators = [...(this.config.creators ?? []), creator];
     await this.saveConfig();
-    await this.resetCatalog();
-    await this.refresh();
+    await this.refresh({
+      onlyCreators: [creator],
+      fullCatalog: true,
+    });
     return { ...this.listCreators(), added: true, creator };
   }
 
   async removeCreator(secUid) {
+    await this.initialize();
     if (this.refreshPromise) await this.refreshPromise;
     const value = String(secUid ?? "");
     const previous = this.config.creators ?? [];
@@ -911,11 +1129,33 @@ class LocalDouyinClient {
     }
 
     this.config.creators = creators;
+    const removedIds = new Set(
+      [...this.items.values()]
+        .filter((item) => item.authorId === value)
+        .map((item) => item.id),
+    );
+    for (const id of removedIds) this.items.delete(id);
+    this.state.knownIds = this.state.knownIds.filter(
+      (id) => !removedIds.has(id),
+    );
+    this.state.pendingNewIds = this.state.pendingNewIds.filter(
+      (id) => !removedIds.has(id),
+    );
+    this.state.recentIds = this.state.recentIds.filter(
+      (id) => !removedIds.has(id),
+    );
+    delete this.state.creatorHighWaterMarks[value];
+    this.state.catalogCompleteCreatorIds =
+      this.state.catalogCompleteCreatorIds.filter(
+        (creatorId) => creatorId !== value,
+      );
+    this.state.refreshCursor = Math.min(
+      this.state.refreshCursor ?? 0,
+      Math.max(0, creators.length - 1),
+    );
     await this.saveConfig();
-    await this.resetCatalog();
-    if (creators.length) {
-      await this.refresh();
-    }
+    await this.saveState();
+    await this.saveCatalog();
     return { ...this.listCreators(), removed: true };
   }
 
@@ -923,11 +1163,7 @@ class LocalDouyinClient {
     if (this.pollTimer) return;
     this.stopped = false;
 
-    const configuredMinutes = Number(this.config.pollIntervalMinutes);
-    const minutes =
-      Number.isFinite(configuredMinutes) && configuredMinutes > 0
-        ? configuredMinutes
-        : DEFAULT_POLL_MINUTES;
+    const minutes = this.effectivePollMinutes();
 
     this.pollTimer = setInterval(() => {
       this.refresh().catch((error) =>
@@ -1020,6 +1256,7 @@ class LocalDouyinClient {
       publishedAt: result.publishedAt,
       kind: result.kind,
     });
+    await this.saveCatalog();
     return result;
   }
 }
