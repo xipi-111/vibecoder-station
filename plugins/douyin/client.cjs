@@ -1063,6 +1063,25 @@ class LocalDouyinClient {
   }
 
   async login() {
+    const authenticated = await this.source.isAuthenticated();
+    if (!authenticated) {
+      const result = await this.source.openLoginWindow();
+      if (result.authenticated) {
+        this.authRequired = false;
+        this.lastRefreshError = null;
+        this.clearRateLimit();
+        await this.saveState();
+        if (this.items.size === 0) {
+          this.refresh({ ignoreBackoff: true }).catch((error) => {
+            console.warn("[douyin-queue] 登录后的首次目录同步失败", error);
+          });
+        }
+      }
+      return {
+        ...(await this.getStatus()),
+        authenticated: result.authenticated,
+      };
+    }
     if (this.state.rateLimit?.verificationRequired) {
       await this.beginHumanVerification();
       return this.getStatus();
@@ -1071,20 +1090,7 @@ class LocalDouyinClient {
       await this.beginHumanVerification(null, { force: true });
       return this.getStatus();
     }
-    const result = await this.source.openLoginWindow();
-    if (result.authenticated) {
-      this.authRequired = false;
-      this.lastRefreshError = null;
-      this.clearRateLimit();
-      await this.saveState();
-      this.refresh({ ignoreBackoff: true }).catch((error) => {
-        console.warn("[douyin-queue] 登录后的目录刷新失败", error);
-      });
-    }
-    return {
-      ...(await this.getStatus()),
-      authenticated: result.authenticated,
-    };
+    return this.getStatus();
   }
 
   listCreators() {

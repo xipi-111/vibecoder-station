@@ -90,13 +90,20 @@ async function main() {
     }
 
     const targetedFetches = [];
+    let authenticated = false;
+    let loginWindows = 0;
     const secondConfig = JSON.parse(
       await fs.readFile(configPath, "utf8"),
     );
     const secondClient = new LocalDouyinClient({
       source: {
-        isAuthenticated: async () => true,
+        isAuthenticated: async () => authenticated,
         close: () => {},
+        openLoginWindow: async () => {
+          loginWindows += 1;
+          authenticated = true;
+          return { authenticated: true };
+        },
         resolveCreatorProfile: async () => creatorTwo,
         fetchCreatorVideos: async (creator, options) => {
           targetedFetches.push({ secUid: creator.secUid, options });
@@ -114,6 +121,14 @@ async function main() {
     const restoredQueue = await secondClient.getQueueInfo(null);
     if (targetedFetches.length !== 0 || restoredQueue.itemCount !== 2) {
       throw new Error("重启后没有直接使用本地目录");
+    }
+    const loginStatus = await secondClient.login();
+    if (
+      !loginStatus.authenticated ||
+      loginWindows !== 1 ||
+      targetedFetches.length !== 0
+    ) {
+      throw new Error("缓存目录下登录触发了目录刷新或没有完成登录");
     }
 
     await secondClient.addCreator(creatorTwo.shareUrl);
@@ -193,6 +208,7 @@ async function main() {
         result: "passed",
         cachedItems: storedCatalog.items.length,
         restartRequests: 0,
+        loginWithoutRefresh: true,
         targetedAddRequests: targetedFetches.length,
         legacyMigratedWithoutRequests: true,
         pollIntervalMinutes: 180,

@@ -214,7 +214,7 @@ export function ManagerApp() {
     selectedPlugin?.capabilities?.authentication &&
     (verificationRequired ||
       canInspectSource ||
-      (status?.authRequired && !authenticated));
+      !authenticated);
   const authenticationActionLabel = loginBusy
     ? verificationRequired
       ? "等待验证"
