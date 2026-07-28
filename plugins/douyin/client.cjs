@@ -5,9 +5,15 @@ const DEFAULT_POLL_MINUTES = 15;
 const MAX_RECENT_ITEMS = 20;
 const FAST_SYNC_CREATOR_THRESHOLD = 12;
 const FAST_SYNC_PAGE_LIMIT = 1;
-const FAST_SYNC_BATCH_SIZE = 4;
-const FAST_SYNC_SLICE_DELAY_MS = 30_000;
-const FAST_SYNC_THROTTLED_RETRY_MS = 5 * 60_000;
+const FAST_SYNC_BATCH_SIZE = 2;
+const FAST_SYNC_SLICE_DELAY_MIN_MS = 45_000;
+const FAST_SYNC_SLICE_DELAY_MAX_MS = 75_000;
+const FAST_SYNC_THROTTLE_BACKOFF_MS = [
+  5 * 60_000,
+  15 * 60_000,
+  30 * 60_000,
+  60 * 60_000,
+];
 
 function compareVideoIdsDescending(left, right) {
   const leftId = BigInt(left.id);
@@ -25,12 +31,69 @@ function randomItem(values) {
   return values[Math.floor(Math.random() * values.length)];
 }
 
+function emptyRateLimitState() {
+  return {
+    consecutiveFailures: 0,
+    nextRetryAt: null,
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastThrottleAt: null,
+    lastErrorKind: null,
+    lastHttpStatus: null,
+    lastMessage: null,
+    totalAttempts: 0,
+    totalSuccesses: 0,
+    totalThrottles: 0,
+  };
+}
+
+function normalizeRateLimitState(value) {
+  const fallback = emptyRateLimitState();
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return fallback;
+  }
+  const timestamp = (candidate) =>
+    typeof candidate === "string" && Number.isFinite(Date.parse(candidate))
+      ? candidate
+      : null;
+  const count = (candidate) =>
+    Number.isInteger(candidate) && candidate >= 0 ? candidate : 0;
+  return {
+    consecutiveFailures: count(value.consecutiveFailures),
+    nextRetryAt: timestamp(value.nextRetryAt),
+    lastAttemptAt: timestamp(value.lastAttemptAt),
+    lastSuccessAt: timestamp(value.lastSuccessAt),
+    lastThrottleAt: timestamp(value.lastThrottleAt),
+    lastErrorKind:
+      typeof value.lastErrorKind === "string"
+        ? value.lastErrorKind
+        : null,
+    lastHttpStatus: Number.isInteger(value.lastHttpStatus)
+      ? value.lastHttpStatus
+      : null,
+    lastMessage:
+      typeof value.lastMessage === "string" ? value.lastMessage : null,
+    totalAttempts: count(value.totalAttempts),
+    totalSuccesses: count(value.totalSuccesses),
+    totalThrottles: count(value.totalThrottles),
+  };
+}
+
 class LocalDouyinClient {
-  constructor({ source, config, configPath, userDataPath }) {
+  constructor({
+    source,
+    config,
+    configPath,
+    userDataPath,
+    now = () => Date.now(),
+    random = Math.random,
+  }) {
     this.source = source;
     this.config = config;
     this.configPath = configPath;
     this.statePath = path.join(userDataPath, "douyin-queue-state.json");
+    this.now = now;
+    this.random = random;
     this.items = new Map();
     this.state = {
       knownIds: [],
@@ -39,11 +102,14 @@ class LocalDouyinClient {
       creatorHighWaterMarks: {},
       catalogCompleteCreatorIds: [],
       refreshCursor: 0,
+      catalogTransport: "api",
+      rateLimit: emptyRateLimitState(),
     };
     this.initialization = null;
     this.refreshPromise = null;
     this.pollTimer = null;
     this.sliceTimer = null;
+    this.sliceTimerDueAt = null;
     this.authRequired = false;
     this.partialCount = 0;
     this.lastRefreshError = null;
@@ -98,6 +164,11 @@ class LocalDouyinClient {
       creatorHighWaterMarks: {},
       catalogCompleteCreatorIds: [],
       refreshCursor: 0,
+      catalogTransport:
+        this.state.catalogTransport === "profile_page"
+          ? "profile_page"
+          : "api",
+      rateLimit: normalizeRateLimitState(this.state.rateLimit),
     };
     this.authRequired = false;
     this.partialCount = 0;
@@ -128,6 +199,11 @@ class LocalDouyinClient {
         refreshCursor: Number.isInteger(stored.refreshCursor)
           ? Math.max(0, stored.refreshCursor)
           : 0,
+        catalogTransport:
+          stored.catalogTransport === "profile_page"
+            ? "profile_page"
+            : "api",
+        rateLimit: normalizeRateLimitState(stored.rateLimit),
       };
 
       for (const id of this.state.knownIds) {
@@ -161,12 +237,109 @@ class LocalDouyinClient {
     this.initialization = (async () => {
       await this.loadState();
 
-      this.refresh().catch((error) => {
-        console.warn("[douyin-queue] 首次检查更新失败，使用本地目录", error);
-      });
+      const retryDelay = this.rateLimitDelayRemaining();
+      if (retryDelay > 0) {
+        this.scheduleSliceRefresh(retryDelay);
+      } else {
+        this.refresh().catch((error) => {
+          console.warn(
+            "[douyin-queue] 首次检查更新失败，使用本地目录",
+            error,
+          );
+        });
+      }
     })();
 
     return this.initialization;
+  }
+
+  timestamp() {
+    return new Date(this.now()).toISOString();
+  }
+
+  randomBetween(minimum, maximum) {
+    return Math.round(
+      minimum + this.random() * Math.max(0, maximum - minimum),
+    );
+  }
+
+  rateLimitDelayRemaining() {
+    const retryAt = Date.parse(this.state.rateLimit?.nextRetryAt ?? "");
+    if (!Number.isFinite(retryAt)) return 0;
+    return Math.max(0, retryAt - this.now());
+  }
+
+  clearRateLimit() {
+    this.state.rateLimit = {
+      ...normalizeRateLimitState(this.state.rateLimit),
+      consecutiveFailures: 0,
+      nextRetryAt: null,
+      lastErrorKind: null,
+      lastHttpStatus: null,
+      lastMessage: null,
+    };
+  }
+
+  recordBatchTelemetry(results) {
+    const rateLimit = normalizeRateLimitState(this.state.rateLimit);
+    const attempted = results.filter(
+      (result) => result.attempted !== false,
+    );
+    const successful = attempted.filter(
+      (result) => !result.error && !result.throttled,
+    );
+    const failed = attempted.find(
+      (result) => result.error && !result.throttled,
+    );
+    if (attempted.length) {
+      rateLimit.lastAttemptAt = this.timestamp();
+      rateLimit.totalAttempts += attempted.length;
+    }
+    if (successful.length) {
+      rateLimit.lastSuccessAt = this.timestamp();
+      rateLimit.totalSuccesses += successful.length;
+    }
+
+    const throttled = attempted.find((result) => result.throttled);
+    if (throttled) {
+      rateLimit.consecutiveFailures += 1;
+      rateLimit.lastThrottleAt = this.timestamp();
+      rateLimit.lastErrorKind =
+        throttled.errorKind ?? "rate_limit";
+      rateLimit.lastHttpStatus = Number.isInteger(throttled.httpStatus)
+        ? throttled.httpStatus
+        : null;
+      rateLimit.lastMessage =
+        throttled.error ?? "抖音暂时限制了目录请求";
+      rateLimit.totalThrottles += 1;
+      const backoffIndex = Math.min(
+        rateLimit.consecutiveFailures - 1,
+        FAST_SYNC_THROTTLE_BACKOFF_MS.length - 1,
+      );
+      const configuredBackoff =
+        FAST_SYNC_THROTTLE_BACKOFF_MS[backoffIndex];
+      const responseBackoff = Math.max(
+        0,
+        Number(throttled.retryAfterMs) || 0,
+      );
+      const delay = Math.max(
+        configuredBackoff,
+        responseBackoff,
+      );
+      rateLimit.nextRetryAt = new Date(this.now() + delay).toISOString();
+    } else if (successful.length || failed) {
+      rateLimit.consecutiveFailures = 0;
+      rateLimit.nextRetryAt = null;
+      rateLimit.lastErrorKind =
+        failed?.errorKind ?? null;
+      rateLimit.lastHttpStatus = Number.isInteger(failed?.httpStatus)
+        ? failed.httpStatus
+        : null;
+      rateLimit.lastMessage = failed?.error ?? null;
+    }
+
+    this.state.rateLimit = rateLimit;
+    return throttled ?? null;
   }
 
   registerCreatorVideos(
@@ -229,11 +402,17 @@ class LocalDouyinClient {
     ];
   }
 
-  async refresh() {
+  async refresh({ ignoreBackoff = false } = {}) {
     if (this.refreshPromise) return this.refreshPromise;
+    const retryDelay = this.rateLimitDelayRemaining();
+    if (!ignoreBackoff && retryDelay > 0) {
+      this.scheduleSliceRefresh(retryDelay);
+      return;
+    }
     if (this.sliceTimer) {
       clearTimeout(this.sliceTimer);
       this.sliceTimer = null;
+      this.sliceTimerDueAt = null;
     }
 
     this.refreshPromise = (async () => {
@@ -270,6 +449,7 @@ class LocalDouyinClient {
       let lastRefreshError = null;
       let configChanged = false;
       let throttled = false;
+      let processedCreatorCount = creators.length;
       this.syncProcessed = storedCursor;
       this.syncTotal = configuredCreators.length;
 
@@ -325,8 +505,28 @@ class LocalDouyinClient {
               {
                 stopAfterIds: creatorHighWaterMarks,
                 concurrency: 1,
+                preferProfile:
+                  this.state.catalogTransport === "profile_page",
               },
             );
+            if (
+              results.some(
+                (result) => result.transport === "profile_page",
+              )
+            ) {
+              this.state.catalogTransport = "profile_page";
+            }
+            const throttleResult = this.recordBatchTelemetry(results);
+            if (throttleResult) {
+              const firstThrottledIndex = results.findIndex(
+                (result) =>
+                  result.throttled && result.attempted !== false,
+              );
+              processedCreatorCount =
+                firstThrottledIndex >= 0
+                  ? offset + firstThrottledIndex
+                  : offset;
+            }
             for (const result of results) {
               throttled ||= Boolean(result.throttled);
               if (result.loginRequired) authRequired = true;
@@ -338,13 +538,30 @@ class LocalDouyinClient {
               }
             }
           } catch (error) {
+            this.recordBatchTelemetry(
+              batch.map(() => ({
+                attempted: true,
+                error: error?.message ?? String(error),
+                errorKind:
+                  error?.errorKind ??
+                  error?.code ??
+                  "request_error",
+                httpStatus: error?.httpStatus,
+                retryAfterMs: error?.retryAfterMs,
+                throttled: Boolean(error?.throttled),
+              })),
+            );
+            throttled ||= Boolean(error?.throttled);
+            if (throttled) processedCreatorCount = offset;
             for (const creator of batch) {
               registerFailure(creator, error);
             }
           } finally {
-            if (!throttled) {
-              this.syncProcessed += batch.length;
-            }
+            this.syncProcessed =
+              storedCursor +
+              (throttled
+                ? processedCreatorCount
+                : offset + batch.length);
             await persistProgress();
           }
         }
@@ -362,7 +579,24 @@ class LocalDouyinClient {
                 : undefined,
             );
             registerResult(creator, videos);
+            this.recordBatchTelemetry([
+              {
+                attempted: true,
+                error: null,
+                throttled: false,
+              },
+            ]);
           } catch (error) {
+            const failure = {
+              attempted: true,
+              error: error?.message ?? String(error),
+              errorKind: error?.errorKind ?? error?.code ?? "request_error",
+              httpStatus: error?.httpStatus,
+              retryAfterMs: error?.retryAfterMs,
+              throttled: Boolean(error?.throttled),
+            };
+            this.recordBatchTelemetry([failure]);
+            throttled ||= failure.throttled;
             if (
               error?.code === "DOUYIN_LOGIN_REQUIRED" &&
               Array.isArray(error.partialVideos)
@@ -373,11 +607,12 @@ class LocalDouyinClient {
             }
             registerFailure(creator, error);
           } finally {
-            this.syncProcessed += 1;
+            if (!throttled) this.syncProcessed += 1;
             if (fastSync) {
               await persistProgress();
             }
           }
+          if (throttled) break;
         }
       }
 
@@ -398,23 +633,29 @@ class LocalDouyinClient {
       this.partialCount = partialCount;
       this.lastRefreshError = lastRefreshError?.message ?? null;
       if (fastSync) {
+        const advancedBy = throttled
+          ? processedCreatorCount
+          : creators.length;
         const reachedEnd =
-          storedCursor + creators.length >= configuredCreators.length;
+          storedCursor + advancedBy >= configuredCreators.length;
         this.state.refreshCursor = throttled
-          ? storedCursor
+          ? storedCursor + advancedBy
           : reachedEnd
             ? 0
-            : storedCursor + creators.length;
+            : storedCursor + advancedBy;
       }
       if (configChanged) await this.saveConfig();
       await this.saveState();
 
-      if (fastSync) {
-        if (throttled) {
-          this.scheduleSliceRefresh(FAST_SYNC_THROTTLED_RETRY_MS);
-        } else if (this.state.refreshCursor > 0) {
-          this.scheduleSliceRefresh(FAST_SYNC_SLICE_DELAY_MS);
-        }
+      if (throttled) {
+        this.scheduleSliceRefresh(this.rateLimitDelayRemaining());
+      } else if (fastSync && this.state.refreshCursor > 0) {
+        this.scheduleSliceRefresh(
+          this.randomBetween(
+            FAST_SYNC_SLICE_DELAY_MIN_MS,
+            FAST_SYNC_SLICE_DELAY_MAX_MS,
+          ),
+        );
       }
     })().finally(() => {
       this.refreshPromise = null;
@@ -424,31 +665,59 @@ class LocalDouyinClient {
   }
 
   scheduleSliceRefresh(delayMs) {
-    if (this.sliceTimer) return;
+    const safeDelay = Math.max(1_000, Number(delayMs) || 1_000);
+    const dueAt = this.now() + safeDelay;
+    if (
+      this.sliceTimer &&
+      this.sliceTimerDueAt &&
+      Math.abs(this.sliceTimerDueAt - dueAt) < 1_000
+    ) {
+      return;
+    }
+    if (this.sliceTimer) clearTimeout(this.sliceTimer);
+    this.sliceTimerDueAt = dueAt;
     this.sliceTimer = setTimeout(() => {
       this.sliceTimer = null;
+      this.sliceTimerDueAt = null;
       this.refresh().catch((error) => {
         console.warn(
           "[douyin-queue] 分段检查更新失败，稍后重试",
           error?.message ?? error,
         );
       });
-    }, delayMs);
+    }, safeDelay);
     this.sliceTimer.unref();
   }
 
   async getStatus() {
+    const retryInMs = this.rateLimitDelayRemaining();
+    const rateLimit = normalizeRateLimitState(this.state.rateLimit);
     return {
       authRequired: this.authRequired,
       authenticated: await this.source.isAuthenticated(),
       refreshing: Boolean(this.refreshPromise),
+      throttled: retryInMs > 0,
+      retryAt: retryInMs > 0 ? rateLimit.nextRetryAt : null,
+      retryInMs,
+      lastAttemptAt: rateLimit.lastAttemptAt,
+      lastSuccessAt: rateLimit.lastSuccessAt,
+      lastThrottleAt: rateLimit.lastThrottleAt,
+      lastErrorKind: rateLimit.lastErrorKind,
+      lastHttpStatus: rateLimit.lastHttpStatus,
+      totalAttempts: rateLimit.totalAttempts,
+      totalSuccesses: rateLimit.totalSuccesses,
+      totalThrottles: rateLimit.totalThrottles,
+      catalogTransport: this.state.catalogTransport ?? "api",
       syncProcessed: this.syncProcessed,
       syncTotal: this.syncTotal,
       completeCreatorCount:
         this.state.catalogCompleteCreatorIds?.length ?? 0,
       catalogCount: this.items.size,
       partialCount: this.partialCount,
-      message: this.lastRefreshError,
+      message:
+        retryInMs > 0
+          ? rateLimit.lastMessage ?? "抖音目录同步正在退避"
+          : this.lastRefreshError,
     };
   }
 
@@ -457,7 +726,9 @@ class LocalDouyinClient {
     if (result.authenticated) {
       this.authRequired = false;
       this.lastRefreshError = null;
-      this.refresh().catch((error) => {
+      this.clearRateLimit();
+      await this.saveState();
+      this.refresh({ ignoreBackoff: true }).catch((error) => {
         console.warn("[douyin-queue] 登录后的目录刷新失败", error);
       });
     }
@@ -538,6 +809,7 @@ class LocalDouyinClient {
     if (this.sliceTimer) {
       clearTimeout(this.sliceTimer);
       this.sliceTimer = null;
+      this.sliceTimerDueAt = null;
     }
     this.source.close?.();
   }

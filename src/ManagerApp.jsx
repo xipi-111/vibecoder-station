@@ -170,6 +170,11 @@ export function ManagerApp() {
 
   const authenticated = Boolean(status?.authenticated);
   const refreshing = Boolean(status?.refreshing || collectionBusy);
+  const throttled = Boolean(status?.throttled);
+  const retryMinutes = Math.max(
+    1,
+    Math.ceil((Number(status?.retryInMs) || 0) / 60_000),
+  );
   const catalogCount = status?.catalogCount;
   const syncProcessed = Number(status?.syncProcessed) || 0;
   const syncTotal = Number(status?.syncTotal) || 0;
@@ -275,6 +280,8 @@ export function ManagerApp() {
                 <span>
                   {refreshing
                     ? syncingLabel
+                    : throttled
+                      ? `抖音限流，约 ${retryMinutes} 分钟后重试`
                     : authenticated
                       ? pluginUi.authenticatedStatusLabel ?? "已登录"
                       : pluginUi.guestStatusLabel ?? "未登录"}

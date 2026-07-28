@@ -69,20 +69,20 @@ async function main() {
 
     await client.initialize();
     await client.refresh();
-    while (batchCalls.length < Math.ceil(creators.length / 4)) {
+    while (batchCalls.length < Math.ceil(creators.length / 2)) {
       await client.refresh();
     }
 
     if (
       calls.length !== 0 ||
-      batchCalls.length !== Math.ceil(creators.length / 4) ||
+      batchCalls.length !== Math.ceil(creators.length / 2) ||
       batchCalls.some(
         (call) =>
-          call.items.length > 4 ||
+          call.items.length > 2 ||
           call.options?.concurrency !== 1,
       )
     ) {
-      throw new Error("大量博主没有使用四个一组的分段同步");
+      throw new Error("大量博主没有使用两个一组的低速分段同步");
     }
 
     const status = await client.getStatus();
@@ -112,7 +112,7 @@ async function main() {
         result: "passed",
         creators: creators.length,
         pagesPerCreator: 1,
-        batchSize: 4,
+        batchSize: 2,
         persisted: stored.knownIds.length,
       }),
     );

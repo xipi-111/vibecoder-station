@@ -6,8 +6,9 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_CREATOR_TIMEOUT_MS = 120_000;
 const CATALOG_SESSION_WARMUP_MS = 6_000;
 const CATALOG_REQUEST_TIMEOUT_MS = 12_000;
-const CATALOG_PAGE_DELAY_MS = 600;
-const CATALOG_CREATOR_DELAY_MS = 120;
+const CATALOG_REQUEST_DELAY_MIN_MS = 4_000;
+const CATALOG_REQUEST_DELAY_MAX_MS = 8_000;
+const CATALOG_CREATOR_DELAY_MS = 2_000;
 const CATALOG_BATCH_CONCURRENCY = 4;
 const MAX_CATALOG_PAGES = 200;
 const MEDIA_FALLBACK_TTL_MS = 5 * 60 * 1_000;
@@ -26,6 +27,14 @@ const DOUYIN_PROFILE_HOSTS = new Set([
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function randomCatalogDelay() {
+  return Math.round(
+    CATALOG_REQUEST_DELAY_MIN_MS +
+      Math.random() *
+        (CATALOG_REQUEST_DELAY_MAX_MS - CATALOG_REQUEST_DELAY_MIN_MS),
+  );
 }
 
 function withTimeout(promise, milliseconds, message) {
@@ -279,6 +288,30 @@ class DouyinLoginRequiredError extends Error {
   }
 }
 
+class DouyinCatalogRequestError extends Error {
+  constructor(
+    message,
+    {
+      errorKind = "request_error",
+      httpStatus = null,
+      retryAfterMs = null,
+      throttled = false,
+    } = {},
+  ) {
+    super(message);
+    this.name = "DouyinCatalogRequestError";
+    this.code = throttled
+      ? "DOUYIN_RATE_LIMITED"
+      : "DOUYIN_CATALOG_REQUEST_FAILED";
+    this.errorKind = errorKind;
+    this.httpStatus = Number.isInteger(httpStatus) ? httpStatus : null;
+    this.retryAfterMs = Number.isFinite(Number(retryAfterMs))
+      ? Math.max(0, Number(retryAfterMs))
+      : null;
+    this.throttled = Boolean(throttled);
+  }
+}
+
 class DouyinLocalSource {
   constructor({
     partition = "persist:vibecoder-douyin-public",
@@ -291,6 +324,7 @@ class DouyinLocalSource {
     this.operation = Promise.resolve();
     this.catalogOperation = Promise.resolve();
     this.catalogPagePromise = null;
+    this.preferProfileCatalog = false;
     this.windows = new Set();
     this.loginWindow = null;
   }
@@ -632,15 +666,58 @@ class DouyinLocalSource {
                 credentials: "include",
                 signal: controller.signal,
               });
+              const retryAfterHeader = response.headers.get("retry-after");
+              const retryAfterSeconds = Number(retryAfterHeader);
+              const retryAfterMs = Number.isFinite(retryAfterSeconds)
+                ? Math.max(0, retryAfterSeconds * 1_000)
+                : null;
+              if (response.status === 403 || response.status === 429) {
+                return {
+                  error: "抖音暂时限制了目录请求",
+                  errorKind: "rate_limit",
+                  httpStatus: response.status,
+                  retryAfterMs,
+                  throttled: true,
+                };
+              }
               if (!response.ok) {
-                throw new Error("HTTP " + response.status);
+                return {
+                  error: "抖音目录接口 HTTP " + response.status,
+                  errorKind:
+                    response.status === 401
+                      ? "authentication"
+                      : "http_error",
+                  httpStatus: response.status,
+                  retryAfterMs,
+                  loginRequired: response.status === 401,
+                  throttled: false,
+                };
               }
               const responseText = await response.text();
               if (!responseText.trim()) {
-                throw new Error("抖音暂时限制了目录请求");
+                return {
+                  error: "抖音目录接口返回空响应",
+                  errorKind: "empty_response",
+                  httpStatus: response.status,
+                  retryAfterMs,
+                  throttled: true,
+                };
               }
-              const data = JSON.parse(responseText);
+              let data;
+              try {
+                data = JSON.parse(responseText);
+              } catch {
+                return {
+                  error: "抖音目录响应无法解析",
+                  errorKind: "invalid_response",
+                  httpStatus: response.status,
+                  retryAfterMs,
+                  throttled: true,
+                };
+              }
               return {
+                attempted: true,
+                httpStatus: response.status,
                 statusCode: data.status_code,
                 hasMore:
                   Object.prototype.hasOwnProperty.call(data, "has_more")
@@ -680,7 +757,35 @@ class DouyinLocalSource {
           `读取博主 ${creator.name ?? creator.secUid} 的作品超时`,
         );
 
+        if (responsePage.error) {
+          if (responsePage.loginRequired) {
+            throw new DouyinLoginRequiredError(
+              creator.name ?? creator.secUid,
+              [...discovered.values()],
+            );
+          }
+          throw new DouyinCatalogRequestError(responsePage.error, {
+            errorKind: responsePage.errorKind,
+            httpStatus: responsePage.httpStatus,
+            retryAfterMs: responsePage.retryAfterMs,
+            throttled: responsePage.throttled,
+          });
+        }
         loginRequired ||= responsePage.loginRequired;
+        if (
+          Number.isFinite(Number(responsePage.statusCode)) &&
+          Number(responsePage.statusCode) !== 0 &&
+          !responsePage.loginRequired
+        ) {
+          throw new DouyinCatalogRequestError(
+            `抖音目录接口状态异常：${responsePage.statusCode}`,
+            {
+              errorKind: "api_status",
+              httpStatus: responsePage.httpStatus,
+              throttled: true,
+            },
+          );
+        }
         for (const [id, video] of normalizeCatalogVideos(
           responsePage.videos,
           creator,
@@ -705,6 +810,16 @@ class DouyinLocalSource {
           !responsePage.nextCursor ||
           responsePage.nextCursor === cursor
         ) {
+          if (!loginRequired && discovered.size === 0) {
+            throw new DouyinCatalogRequestError(
+              "抖音返回的目录响应不完整",
+              {
+                errorKind: "invalid_response",
+                httpStatus: responsePage.httpStatus,
+                throttled: true,
+              },
+            );
+          }
           if (loginRequired || !(await this.isAuthenticated())) {
             throw new DouyinLoginRequiredError(
               creator.name ?? creator.secUid,
@@ -717,7 +832,7 @@ class DouyinLocalSource {
         }
 
         cursor = responsePage.nextCursor;
-        await wait(CATALOG_PAGE_DELAY_MS);
+        await wait(randomCatalogDelay());
       }
 
       if (pageLimit < MAX_CATALOG_PAGES) {
@@ -733,11 +848,167 @@ class DouyinLocalSource {
     });
   }
 
+  async fetchCreatorProfilePageVideos(creator, pageContext) {
+    const { window, userAgent } = pageContext;
+    const targetUrl =
+      `https://www.douyin.com/user/${encodeURIComponent(creator.secUid)}`;
+    const currentUrl = window.webContents.getURL();
+    if (!currentUrl.includes(creator.secUid)) {
+      await Promise.race([
+        window
+          .loadURL(targetUrl, { userAgent })
+          .catch(() => undefined),
+        wait(20_000),
+      ]);
+      await wait(CATALOG_SESSION_WARMUP_MS);
+    } else {
+      await wait(1_000);
+    }
+
+    const pageResult = await withTimeout(
+      window.webContents.executeJavaScript(
+        `(() => {
+          const videos = [];
+          const seen = new Set();
+          for (const anchor of document.querySelectorAll("a[href]")) {
+            let parsed;
+            try {
+              parsed = new URL(anchor.href, location.href);
+            } catch {
+              continue;
+            }
+            const match = parsed.pathname.match(
+              /^\\/(video|note)\\/(\\d{10,24})/,
+            );
+            if (!match || seen.has(match[2])) continue;
+            seen.add(match[2]);
+            const image = anchor.querySelector("img");
+            const paragraph = anchor.querySelector("p");
+            videos.push({
+              id: match[2],
+              title:
+                image?.getAttribute("alt") ||
+                paragraph?.textContent?.trim() ||
+                anchor.getAttribute("aria-label") ||
+                "",
+              authorId: ${JSON.stringify(creator.secUid)},
+              authorName: document.title
+                .replace(/\\s*的抖音\\s*-\\s*抖音\\s*$/u, "")
+                .replace(/\\s*-\\s*抖音\\s*$/u, "")
+                .trim(),
+              createTime: null,
+              kind: match[1] === "note" ? "image" : "video",
+              imageCount: match[1] === "note" ? null : 0,
+            });
+          }
+          return {
+            pageUrl: location.href,
+            pageTitle: document.title,
+            videos,
+          };
+        })()`,
+        true,
+      ),
+      CATALOG_REQUEST_TIMEOUT_MS,
+      `读取 ${creator.name ?? creator.secUid} 的主页作品超时`,
+    );
+
+    const videos = [
+      ...normalizeCatalogVideos(pageResult.videos, creator).values(),
+    ];
+    if (!videos.length) {
+      return {
+        creator,
+        videos: catalogResult([]),
+        error: "抖音主页没有返回可读取的作品",
+        errorKind: "profile_page_empty",
+        httpStatus: null,
+        retryAfterMs: null,
+        attempted: true,
+        loginRequired: false,
+        throttled: true,
+        transport: "profile_page",
+      };
+    }
+
+    return {
+      creator,
+      videos: catalogResult(videos, { truncated: true }),
+      error: null,
+      errorKind: null,
+      httpStatus: null,
+      retryAfterMs: null,
+      attempted: true,
+      loginRequired: false,
+      throttled: false,
+      transport: "profile_page",
+    };
+  }
+
+  async fetchCreatorProfileBatch(creators, pageContext, fallbackResults = []) {
+    const results = [];
+    let throttledResult = null;
+
+    for (let index = 0; index < creators.length; index += 1) {
+      const creator = creators[index];
+      if (throttledResult) {
+        results.push({
+          creator,
+          videos: catalogResult([]),
+          error: throttledResult.error,
+          errorKind: throttledResult.errorKind,
+          httpStatus: throttledResult.httpStatus,
+          retryAfterMs: throttledResult.retryAfterMs,
+          attempted: false,
+          loginRequired: false,
+          throttled: true,
+          transport: "profile_page",
+        });
+        continue;
+      }
+
+      try {
+        const result = await this.fetchCreatorProfilePageVideos(
+          creator,
+          pageContext,
+        );
+        const fallback = fallbackResults[index];
+        results.push({
+          ...result,
+          fallbackReason: fallback?.errorKind ?? null,
+        });
+        if (result.throttled) throttledResult = result;
+      } catch (error) {
+        const result = {
+          creator,
+          videos: catalogResult([]),
+          error: error?.message ?? String(error),
+          errorKind: "profile_page_error",
+          httpStatus: null,
+          retryAfterMs: null,
+          attempted: true,
+          loginRequired: false,
+          throttled: true,
+          transport: "profile_page",
+        };
+        results.push(result);
+        throttledResult = result;
+      }
+
+      if (!throttledResult && index + 1 < creators.length) {
+        await wait(randomCatalogDelay());
+      }
+    }
+
+    return results;
+  }
+
   async fetchCreatorLatestBatch(
     creators,
     {
       stopAfterIds = {},
       concurrency = CATALOG_BATCH_CONCURRENCY,
+      preferProfile = false,
     } = {},
   ) {
     return this.runCatalogSerially(async () => {
@@ -762,10 +1033,19 @@ class DouyinLocalSource {
           ? String(stopAfterIds[creator.secUid])
           : null,
       }));
-      const { window } = await this.getCatalogPage(validCreators[0]);
+      const pageContext = await this.getCatalogPage(validCreators[0]);
+      const { window } = pageContext;
+      if (preferProfile || this.preferProfileCatalog) {
+        this.preferProfileCatalog = true;
+        return this.fetchCreatorProfileBatch(
+          validCreators,
+          pageContext,
+        );
+      }
       const requestBudget =
         Math.ceil(requests.length / workerCount) *
-          CATALOG_REQUEST_TIMEOUT_MS +
+          (CATALOG_REQUEST_TIMEOUT_MS +
+            CATALOG_REQUEST_DELAY_MAX_MS) +
         3_000;
 
       const responsePages = await withTimeout(
@@ -774,7 +1054,7 @@ class DouyinLocalSource {
             const requests = ${JSON.stringify(requests)};
             const results = new Array(requests.length);
             let nextIndex = 0;
-            let throttledMessage = null;
+            let throttledResult = null;
 
             const fetchOne = async (request) => {
               const controller = new AbortController();
@@ -797,20 +1077,45 @@ class DouyinLocalSource {
                   credentials: "include",
                   signal: controller.signal,
                 });
+                const retryAfterHeader =
+                  response.headers.get("retry-after");
+                const retryAfterSeconds = Number(retryAfterHeader);
+                const retryAfterMs = Number.isFinite(retryAfterSeconds)
+                  ? Math.max(0, retryAfterSeconds * 1_000)
+                  : null;
                 if (response.status === 403 || response.status === 429) {
                   return {
                     error: "抖音暂时限制了目录请求",
+                    errorKind: "rate_limit",
+                    httpStatus: response.status,
+                    retryAfterMs,
                     throttled: true,
+                    attempted: true,
                   };
                 }
                 if (!response.ok) {
-                  throw new Error("HTTP " + response.status);
+                  return {
+                    error: "抖音目录接口 HTTP " + response.status,
+                    errorKind:
+                      response.status === 401
+                        ? "authentication"
+                        : "http_error",
+                    httpStatus: response.status,
+                    retryAfterMs,
+                    loginRequired: response.status === 401,
+                    throttled: false,
+                    attempted: true,
+                  };
                 }
                 const responseText = await response.text();
                 if (!responseText.trim()) {
                   return {
-                    error: "抖音暂时限制了目录请求",
+                    error: "抖音目录接口返回空响应",
+                    errorKind: "empty_response",
+                    httpStatus: response.status,
+                    retryAfterMs,
                     throttled: true,
+                    attempted: true,
                   };
                 }
                 let data;
@@ -819,10 +1124,16 @@ class DouyinLocalSource {
                 } catch {
                   return {
                     error: "抖音目录响应无法解析",
+                    errorKind: "invalid_response",
+                    httpStatus: response.status,
+                    retryAfterMs,
                     throttled: true,
+                    attempted: true,
                   };
                 }
                 return {
+                  attempted: true,
+                  httpStatus: response.status,
                   statusCode: data.status_code,
                   hasMore:
                     Object.prototype.hasOwnProperty.call(data, "has_more")
@@ -859,6 +1170,12 @@ class DouyinLocalSource {
                     error?.name === "AbortError"
                       ? "请求超时"
                       : error?.message || String(error),
+                  errorKind:
+                    error?.name === "AbortError"
+                      ? "timeout"
+                      : "request_error",
+                  attempted: true,
+                  throttled: false,
                 };
               } finally {
                 clearTimeout(timeout);
@@ -869,17 +1186,34 @@ class DouyinLocalSource {
               while (nextIndex < requests.length) {
                 const index = nextIndex;
                 nextIndex += 1;
-                if (throttledMessage) {
+                if (throttledResult) {
                   results[index] = {
-                    error: throttledMessage,
+                    error: throttledResult.error,
+                    errorKind: throttledResult.errorKind,
+                    httpStatus: throttledResult.httpStatus,
+                    retryAfterMs: throttledResult.retryAfterMs,
                     throttled: true,
+                    attempted: false,
                   };
                   continue;
                 }
                 const result = await fetchOne(requests[index]);
                 results[index] = result;
                 if (result.throttled) {
-                  throttledMessage = result.error;
+                  throttledResult = result;
+                } else if (nextIndex < requests.length) {
+                  const delay =
+                    ${CATALOG_REQUEST_DELAY_MIN_MS} +
+                    Math.round(
+                      Math.random() *
+                        ${
+                          CATALOG_REQUEST_DELAY_MAX_MS -
+                          CATALOG_REQUEST_DELAY_MIN_MS
+                        },
+                    );
+                  await new Promise((resolve) =>
+                    setTimeout(resolve, delay),
+                  );
                 }
               }
             };
@@ -898,14 +1232,22 @@ class DouyinLocalSource {
         "批量读取抖音博主作品超时",
       );
 
-      return validCreators.map((creator, index) => {
+      const apiResults = validCreators.map((creator, index) => {
         const page = responsePages[index] ?? {};
         if (page.error) {
           return {
             creator,
             videos: catalogResult([]),
             error: page.error,
-            loginRequired: false,
+            errorKind: page.errorKind ?? "request_error",
+            httpStatus: Number.isInteger(page.httpStatus)
+              ? page.httpStatus
+              : null,
+            retryAfterMs: Number.isFinite(Number(page.retryAfterMs))
+              ? Number(page.retryAfterMs)
+              : null,
+            attempted: page.attempted !== false,
+            loginRequired: Boolean(page.loginRequired),
             throttled: Boolean(page.throttled),
           };
         }
@@ -921,6 +1263,18 @@ class DouyinLocalSource {
         const malformed =
           page.hasMore === null ||
           (page.hasMore && !page.nextCursor);
+        const apiStatusError =
+          Number.isFinite(Number(page.statusCode)) &&
+          Number(page.statusCode) !== 0;
+        const suspiciousEmpty =
+          malformed &&
+          !page.loginRequired &&
+          videos.length === 0;
+        const responseError = apiStatusError
+          ? `抖音目录接口状态异常：${page.statusCode}`
+          : malformed && !page.loginRequired
+            ? "抖音返回的目录响应不完整"
+            : null;
 
         return {
           creator,
@@ -929,14 +1283,35 @@ class DouyinLocalSource {
             reachedKnown,
             truncated: !complete && !reachedKnown,
           }),
-          error:
-            malformed && !page.loginRequired
-              ? "抖音返回的目录响应不完整"
+          error: responseError,
+          errorKind:
+            apiStatusError
+              ? "api_status"
+              : malformed && !page.loginRequired
+                ? "invalid_response"
               : null,
+          httpStatus: Number.isInteger(page.httpStatus)
+            ? page.httpStatus
+            : null,
+          retryAfterMs: null,
+          attempted: page.attempted !== false,
           loginRequired: Boolean(page.loginRequired),
-          throttled: Boolean(page.throttled),
+          throttled: Boolean(
+            page.throttled ||
+              suspiciousEmpty ||
+              (apiStatusError && !page.loginRequired),
+          ),
         };
       });
+      if (apiResults.some((result) => result.throttled)) {
+        this.preferProfileCatalog = true;
+        return this.fetchCreatorProfileBatch(
+          validCreators,
+          pageContext,
+          apiResults,
+        );
+      }
+      return apiResults;
     });
   }
 
