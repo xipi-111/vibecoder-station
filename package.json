@@ -25,6 +25,7 @@
     "test:douyin-image": "electron electron/douyin-image-smoke.cjs",
     "test:douyin": "electron electron/douyin-source-smoke.cjs",
     "test:config": "node electron/local-douyin-config-smoke.cjs",
+    "test:ordering": "node electron/local-douyin-ordering-smoke.cjs",
     "test:manager-window": "node scripts/manager-window-e2e.mjs",
     "test:transport": "electron electron/transport-smoke.cjs",
     "pack": "npm run build && electron-builder --dir",

@@ -18,7 +18,7 @@ async function main() {
     resolveCreatorProfile: async () => creator,
     fetchCreatorVideos: async () => [
       {
-        id: "7665159402169023419",
+        id: "7000000000000000001",
         authorName: creator.name,
         publishedAt: "2026-07-27T00:00:00.000Z",
       },

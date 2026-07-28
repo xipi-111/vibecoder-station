@@ -11,6 +11,11 @@ function compareVideoIdsDescending(left, right) {
   return leftId > rightId ? -1 : 1;
 }
 
+function isVideoIdNewer(candidateId, referenceId) {
+  if (!referenceId) return true;
+  return BigInt(candidateId) > BigInt(referenceId);
+}
+
 function randomItem(values) {
   return values[Math.floor(Math.random() * values.length)];
 }
@@ -26,6 +31,7 @@ class LocalDouyinClient {
       knownIds: [],
       pendingNewIds: [],
       recentIds: [],
+      creatorHighWaterMarks: {},
     };
     this.initialization = null;
     this.refreshPromise = null;
@@ -79,6 +85,7 @@ class LocalDouyinClient {
       knownIds: [],
       pendingNewIds: [],
       recentIds: [],
+      creatorHighWaterMarks: {},
     };
     this.authRequired = false;
     this.partialCount = 0;
@@ -95,6 +102,12 @@ class LocalDouyinClient {
           ? stored.pendingNewIds
           : [],
         recentIds: Array.isArray(stored.recentIds) ? stored.recentIds : [],
+        creatorHighWaterMarks:
+          stored.creatorHighWaterMarks &&
+          typeof stored.creatorHighWaterMarks === "object" &&
+          !Array.isArray(stored.creatorHighWaterMarks)
+            ? stored.creatorHighWaterMarks
+            : {},
       };
 
       for (const id of this.state.knownIds) {
@@ -142,10 +155,46 @@ class LocalDouyinClient {
     this.refreshPromise = (async () => {
       const known = new Set(this.state.knownIds);
       const pending = new Set(this.state.pendingNewIds);
+      const creatorHighWaterMarks = {
+        ...this.state.creatorHighWaterMarks,
+      };
       let authRequired = false;
       let partialCount = 0;
       let lastRefreshError = null;
       let configChanged = false;
+
+      const registerCreatorVideos = (creator, videos) => {
+        const previousHighWater =
+          creatorHighWaterMarks[creator.secUid] ?? null;
+        const latestVideo = [...videos].sort(compareVideoIdsDescending)[0];
+
+        videos.forEach((video, rank) => {
+          this.items.set(video.id, {
+            ...video,
+            authorName: creator.name,
+            authorId: creator.secUid,
+            rank,
+          });
+
+          if (!known.has(video.id)) {
+            known.add(video.id);
+            if (
+              previousHighWater
+                ? isVideoIdNewer(video.id, previousHighWater)
+                : video.id === latestVideo?.id
+            ) {
+              pending.add(video.id);
+            }
+          }
+        });
+
+        if (
+          latestVideo &&
+          isVideoIdNewer(latestVideo.id, previousHighWater)
+        ) {
+          creatorHighWaterMarks[creator.secUid] = latestVideo.id;
+        }
+      };
 
       for (const creator of this.config.creators ?? []) {
         try {
@@ -157,19 +206,7 @@ class LocalDouyinClient {
             creator.name = resolvedName;
             configChanged = true;
           }
-          videos.forEach((video, rank) => {
-            this.items.set(video.id, {
-              ...video,
-              authorName: creator.name,
-              authorId: creator.secUid,
-              rank,
-            });
-
-            if (!known.has(video.id)) {
-              known.add(video.id);
-              pending.add(video.id);
-            }
-          });
+          registerCreatorVideos(creator, videos);
         } catch (error) {
           if (
             error?.code === "DOUYIN_LOGIN_REQUIRED" &&
@@ -177,22 +214,13 @@ class LocalDouyinClient {
           ) {
             authRequired = true;
             partialCount += error.partialVideos.length;
-            error.partialVideos.forEach((video, rank) => {
+            error.partialVideos.forEach((video) => {
               if (video.authorName && video.authorName !== creator.name) {
                 creator.name = video.authorName;
                 configChanged = true;
               }
-              this.items.set(video.id, {
-                ...video,
-                authorName: creator.name,
-                authorId: creator.secUid,
-                rank,
-              });
-              if (!known.has(video.id)) {
-                known.add(video.id);
-                pending.add(video.id);
-              }
             });
+            registerCreatorVideos(creator, error.partialVideos);
           }
           lastRefreshError = error;
           console.warn(
@@ -211,6 +239,7 @@ class LocalDouyinClient {
 
       this.state.knownIds = [...known];
       this.state.pendingNewIds = [...pending];
+      this.state.creatorHighWaterMarks = creatorHighWaterMarks;
       this.authRequired = authRequired;
       this.partialCount = partialCount;
       this.lastRefreshError = lastRefreshError?.message ?? null;
