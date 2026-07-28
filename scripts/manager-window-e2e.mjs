@@ -82,8 +82,9 @@ const mainTarget = await waitFor(
     (await targets()).find(
       (target) =>
         target.type === "page" &&
-        !target.url.endsWith("/manager.html") &&
-        !target.url.endsWith("manager.html"),
+        target.title === "VibeCoder 加油站" &&
+        (target.url.endsWith("/index.html") ||
+          target.url.endsWith("index.html")),
     ),
   "没有找到播放器窗口",
 );
