@@ -3,6 +3,7 @@ node_modules/
 .npmrc
 dist/
 release/
+plugin-dist/
 .DS_Store
 *.log
 

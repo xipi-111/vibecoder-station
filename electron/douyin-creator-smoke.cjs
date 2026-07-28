@@ -1,5 +1,5 @@
 const { app } = require("electron");
-const { DouyinLocalSource } = require("./douyin-local-source.cjs");
+const { DouyinLocalSource } = require("../plugins/douyin/source.cjs");
 
 const expectedSecUid =
   "MS4wLjABAAAAfmD6yKVDHEEyYtQ908o3jp7Eo-ge0vraIeuTJoxgsaNN5mFFmagrgnLmGerDPth-";

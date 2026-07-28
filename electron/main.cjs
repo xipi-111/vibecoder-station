@@ -3,17 +3,15 @@ const fs = require("node:fs");
 const {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   protocol,
   screen,
   session,
 } = require("electron");
-const { loadResolverToken } = require("./credential-store.cjs");
-const { DouyinLocalSource } = require("./douyin-local-source.cjs");
-const { LocalDouyinClient } = require("./local-douyin-client.cjs");
 const { MediaTransport } = require("./media-transport.cjs");
+const { PluginHost } = require("./plugin-system/plugin-host.cjs");
 const { QueueService } = require("./queue-service.cjs");
-const { ResolverClient } = require("./resolver-client.cjs");
 
 const MEDIA_SCHEME = "vibecoder-media";
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || null;
@@ -27,7 +25,7 @@ let mainWindow = null;
 let managerWindow = null;
 let managerBoundsSaveTimer = null;
 let queueService = null;
-let localDouyinClient = null;
+let pluginHost = null;
 let isQuitting = false;
 
 protocol.registerSchemesAsPrivileged([
@@ -195,7 +193,7 @@ function createManagerWindow() {
     resizable: true,
     minimizable: true,
     maximizable: false,
-    title: "博主管理 · VibeCoder 加油站",
+    title: "内容源 · VibeCoder 加油站",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -260,60 +258,69 @@ function registerIpc() {
     return queueService.getNext(String(currentId ?? ""));
   });
 
-  ipcMain.handle("douyin:get-status", async (event) => {
+  ipcMain.handle("plugins:list", (event) => {
     if (!isTrustedSender(event)) throw new Error("拒绝未授权的 IPC 请求");
-    if (!localDouyinClient) return { available: false };
-    return {
-      available: true,
-      ...(await localDouyinClient.getStatus()),
-    };
+    return pluginHost.listPlugins();
   });
 
-  ipcMain.handle("douyin:login", async (event) => {
+  ipcMain.handle("plugins:install", async (event) => {
     if (!isTrustedSender(event)) throw new Error("拒绝未授权的 IPC 请求");
-    if (!localDouyinClient) {
-      throw new Error("当前使用外部解析服务，不需要应用内抖音登录");
+    const ownerWindow =
+      BrowserWindow.fromWebContents(event.sender) ?? managerWindow ?? mainWindow;
+    const result = await dialog.showOpenDialog(ownerWindow, {
+      title: "安装 VibeCoder 内容源插件",
+      properties: ["openFile"],
+      filters: [
+        { name: "VibeCoder 插件", extensions: ["vibeplugin"] },
+        { name: "ZIP 压缩包", extensions: ["zip"] },
+      ],
+    });
+    if (result.canceled || !result.filePaths[0]) {
+      return { canceled: true, ...pluginHost.listPlugins() };
     }
-    return {
-      available: true,
-      ...(await localDouyinClient.login()),
-    };
+    const installed = await pluginHost.installPackage(result.filePaths[0]);
+    mainWindow?.webContents.send("plugins:changed");
+    managerWindow?.webContents.send("plugins:changed");
+    return installed;
   });
 
-  ipcMain.handle("creators:list", (event) => {
+  ipcMain.handle("plugins:get-status", async (event, pluginId) => {
     if (!isTrustedSender(event)) throw new Error("拒绝未授权的 IPC 请求");
-    if (!localDouyinClient) return { available: false, creators: [] };
-    return { available: true, ...localDouyinClient.listCreators() };
+    return pluginHost.getPluginStatus(String(pluginId ?? ""));
   });
 
-  ipcMain.handle("creators:open-manager", (event) => {
+  ipcMain.handle("plugins:login", async (event, pluginId) => {
+    if (!isTrustedSender(event)) throw new Error("拒绝未授权的 IPC 请求");
+    return pluginHost.loginPlugin(String(pluginId ?? ""));
+  });
+
+  ipcMain.handle("plugins:list-collections", (event, pluginId) => {
+    if (!isTrustedSender(event)) throw new Error("拒绝未授权的 IPC 请求");
+    return pluginHost.listCollections(String(pluginId ?? ""));
+  });
+
+  ipcMain.handle("plugins:open-manager", (event) => {
     if (!isTrustedSender(event)) throw new Error("拒绝未授权的 IPC 请求");
     createManagerWindow();
     return true;
   });
 
-  ipcMain.handle("creators:add", async (event, input) => {
+  ipcMain.handle("plugins:add-collection", async (event, pluginId, input) => {
     if (!isTrustedSender(event)) throw new Error("拒绝未授权的 IPC 请求");
-    if (!localDouyinClient) {
-      throw new Error("外部解析服务模式下请在服务端配置博主");
-    }
     const value = String(input ?? "").slice(0, 4_096);
-    return {
-      available: true,
-      ...(await localDouyinClient.addCreator(value)),
-    };
+    return pluginHost.addCollection(String(pluginId ?? ""), value);
   });
 
-  ipcMain.handle("creators:remove", async (event, secUid) => {
-    if (!isTrustedSender(event)) throw new Error("拒绝未授权的 IPC 请求");
-    if (!localDouyinClient) {
-      throw new Error("外部解析服务模式下请在服务端配置博主");
-    }
-    return {
-      available: true,
-      ...(await localDouyinClient.removeCreator(String(secUid ?? ""))),
-    };
-  });
+  ipcMain.handle(
+    "plugins:remove-collection",
+    async (event, pluginId, collectionId) => {
+      if (!isTrustedSender(event)) throw new Error("拒绝未授权的 IPC 请求");
+      return pluginHost.removeCollection(
+        String(pluginId ?? ""),
+        String(collectionId ?? ""),
+      );
+    },
+  );
 }
 
 function createWindow() {
@@ -362,44 +369,9 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  const resolverUrl = process.env.VIBECODER_RESOLVER_URL;
-  const token = await loadResolverToken(app.getPath("userData"), resolverUrl);
-  let resolverClient;
-
-  if (resolverUrl) {
-    resolverClient = new ResolverClient({
-      baseUrl: resolverUrl,
-      token,
-    });
-  } else {
-    const bundledConfigPath = path.join(
-      __dirname,
-      "config",
-      "creators.json",
-    );
-    const userConfigPath = path.join(
-      app.getPath("userData"),
-      "douyin-creators.json",
-    );
-    let config;
-    try {
-      config = JSON.parse(fs.readFileSync(userConfigPath, "utf8"));
-    } catch (error) {
-      if (error?.code !== "ENOENT") {
-        console.warn("[douyin-config] 用户配置无效，使用内置配置", error);
-      }
-      config = JSON.parse(fs.readFileSync(bundledConfigPath, "utf8"));
-    }
-    localDouyinClient = new LocalDouyinClient({
-      source: new DouyinLocalSource(),
-      config,
-      configPath: userConfigPath,
-      userDataPath: app.getPath("userData"),
-    });
-    resolverClient = localDouyinClient;
-    localDouyinClient.startPolling();
-  }
-  const mediaTransport = new MediaTransport({ resolverClient });
+  pluginHost = new PluginHost({ userDataPath: app.getPath("userData") });
+  await pluginHost.initialize();
+  const mediaTransport = new MediaTransport({ resolverClient: pluginHost });
 
   protocol.handle(MEDIA_SCHEME, (request) => mediaTransport.handle(request));
   session.defaultSession.setPermissionRequestHandler(
@@ -407,9 +379,8 @@ app.whenReady().then(async () => {
   );
 
   queueService = new QueueService({
-    resolverClient,
+    resolverClient: pluginHost,
     mediaTransport,
-    mediaDirectory: path.join(__dirname, "..", "dist", "media"),
   });
 
   registerIpc();
@@ -428,5 +399,5 @@ app.on("before-quit", () => {
   isQuitting = true;
   if (managerBoundsSaveTimer) clearTimeout(managerBoundsSaveTimer);
   saveManagerBounds();
-  localDouyinClient?.stopPolling();
+  pluginHost?.stop();
 });

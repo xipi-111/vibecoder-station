@@ -5,16 +5,34 @@ contextBridge.exposeInMainWorld(
   Object.freeze({
     platform: process.platform,
     closeWindow: () => ipcRenderer.invoke("window:close"),
-    openCreatorManager: () => ipcRenderer.invoke("creators:open-manager"),
+    openSourceManager: () => ipcRenderer.invoke("plugins:open-manager"),
     getInitialStream: () => ipcRenderer.invoke("stream:get-initial"),
     getNextStream: (currentId) =>
       ipcRenderer.invoke("stream:get-next", String(currentId ?? "")),
-    getDouyinStatus: () => ipcRenderer.invoke("douyin:get-status"),
-    loginDouyin: () => ipcRenderer.invoke("douyin:login"),
-    listCreators: () => ipcRenderer.invoke("creators:list"),
-    addCreator: (input) =>
-      ipcRenderer.invoke("creators:add", String(input ?? "")),
-    removeCreator: (secUid) =>
-      ipcRenderer.invoke("creators:remove", String(secUid ?? "")),
+    listPlugins: () => ipcRenderer.invoke("plugins:list"),
+    installPlugin: () => ipcRenderer.invoke("plugins:install"),
+    getPluginStatus: (pluginId) =>
+      ipcRenderer.invoke("plugins:get-status", String(pluginId ?? "")),
+    loginPlugin: (pluginId) =>
+      ipcRenderer.invoke("plugins:login", String(pluginId ?? "")),
+    listCollections: (pluginId) =>
+      ipcRenderer.invoke("plugins:list-collections", String(pluginId ?? "")),
+    addCollection: (pluginId, input) =>
+      ipcRenderer.invoke(
+        "plugins:add-collection",
+        String(pluginId ?? ""),
+        String(input ?? ""),
+      ),
+    removeCollection: (pluginId, collectionId) =>
+      ipcRenderer.invoke(
+        "plugins:remove-collection",
+        String(pluginId ?? ""),
+        String(collectionId ?? ""),
+      ),
+    onPluginsChanged: (callback) => {
+      const listener = () => callback();
+      ipcRenderer.on("plugins:changed", listener);
+      return () => ipcRenderer.removeListener("plugins:changed", listener);
+    },
   }),
 );

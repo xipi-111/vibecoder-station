@@ -1,5 +1,5 @@
 const { app, net } = require("electron");
-const { DouyinLocalSource } = require("./douyin-local-source.cjs");
+const { DouyinLocalSource } = require("../plugins/douyin/source.cjs");
 
 app.on("window-all-closed", () => {});
 

@@ -1,5 +1,5 @@
 const { app } = require("electron");
-const { DouyinLocalSource } = require("./douyin-local-source.cjs");
+const { DouyinLocalSource } = require("../plugins/douyin/source.cjs");
 
 const creator = {
   name: "余多多奢品（上门收）",

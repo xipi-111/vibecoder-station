@@ -347,6 +347,20 @@ class LocalDouyinClient {
     this.pollTimer = null;
   }
 
+  async getQueueInfo(afterId) {
+    await this.initialize();
+    const pendingIds = new Set(this.state.pendingNewIds);
+    const newest = [...this.items.values()]
+      .filter((item) => pendingIds.has(item.id) && item.id !== afterId)
+      .sort(compareVideoIdsDescending)[0];
+    return {
+      hasNew: Boolean(newest),
+      newestPublishedAt: newest?.publishedAt ?? null,
+      pendingCount: this.state.pendingNewIds.length,
+      itemCount: this.items.size,
+    };
+  }
+
   async next(afterId) {
     await this.initialize();
 

@@ -1,7 +1,7 @@
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { LocalDouyinClient } = require("./local-douyin-client.cjs");
+const { LocalDouyinClient } = require("../plugins/douyin/client.cjs");
 
 async function main() {
   const testDirectory = await fs.mkdtemp(

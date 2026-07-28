@@ -4,10 +4,10 @@ import {
   GearSix,
   Pause,
   Play,
+  PlugsConnected,
   SkipForward,
   SpeakerHigh,
   SpeakerSlash,
-  UsersThree,
   X,
 } from "@phosphor-icons/react";
 import { animate, createScope, utils } from "animejs";
@@ -300,17 +300,24 @@ export function App() {
   useEffect(() => {
     let active = true;
 
-    streamProvider
-      .getInitial()
-      .then((initialStream) => {
-        if (active) setSlotStream(0, initialStream);
-      })
-      .catch((error) => {
-        console.error("[stream] 无法取得首个作品", error);
-      });
+    const loadInitial = () => {
+      streamProvider
+        .getInitial()
+        .then((initialStream) => {
+          if (active) setSlotStream(activeSlotRef.current, initialStream);
+        })
+        .catch((error) => {
+          console.error("[stream] 无法取得首个作品", error);
+        });
+    };
+    loadInitial();
+    const unsubscribe = streamProvider.onPluginsChanged(() => {
+      if (!slotsRef.current[activeSlotRef.current]?.id) loadInitial();
+    });
 
     return () => {
       active = false;
+      unsubscribe();
     };
   }, [setSlotStream]);
 
@@ -525,10 +532,10 @@ export function App() {
     setSpeedMenuOpen(false);
   }, []);
 
-  const openCreatorManager = useCallback(() => {
+  const openSourceManager = useCallback(() => {
     setSpeedMenuOpen(false);
-    streamProvider.openCreatorManager().catch((error) => {
-      console.error("[creators] 无法打开博主管理窗口", error);
+    streamProvider.openSourceManager().catch((error) => {
+      console.error("[plugins] 无法打开内容源管理窗口", error);
     });
   }, []);
 
@@ -554,10 +561,10 @@ export function App() {
             <div className="top-left-controls">
               <IconButton
                 className="player-control corner-control utility-control"
-                label="管理博主"
-                onClick={openCreatorManager}
+                label="管理内容源"
+                onClick={openSourceManager}
               >
-                <UsersThree size={27} weight="regular" />
+                <PlugsConnected size={27} weight="regular" />
               </IconButton>
             </div>
             <div className="top-right-controls">

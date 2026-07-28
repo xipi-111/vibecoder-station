@@ -1,32 +1,7 @@
-const path = require("node:path");
-
-const DEMO_ITEMS = [
-  {
-    id: "maker-workshop",
-    mediaFile: "maker-workshop.mp4",
-    posterFile: "maker-workshop.png",
-    priority: "new",
-    publishedAt: "2026-07-27T00:00:00.000Z",
-  },
-  {
-    id: "indie-developer",
-    mediaFile: "indie-developer.mp4",
-    posterFile: "indie-developer.png",
-    priority: "shuffle",
-    publishedAt: "2026-07-24T00:00:00.000Z",
-  },
-  {
-    id: "product-sketch",
-    mediaFile: "product-sketch.mp4",
-    posterFile: "product-sketch.png",
-    priority: "shuffle",
-    publishedAt: "2026-07-21T00:00:00.000Z",
-  },
-];
-
 function publicItem(item) {
   return {
     id: item.id,
+    pluginId: item.pluginId ?? null,
     authorId: item.authorId ?? null,
     publishedAt: item.publishedAt ?? null,
     priority: item.priority ?? "shuffle",
@@ -41,33 +16,25 @@ function publicItem(item) {
     ),
     posterUrl:
       item.posterUrl ??
-      (item.posterFile || item.posterMedia
+      (item.posterMedia
         ? `vibecoder-media://poster/${encodeURIComponent(item.id)}`
         : undefined),
   };
 }
 
 class QueueService {
-  constructor({ resolverClient, mediaTransport, mediaDirectory }) {
+  constructor({ resolverClient, mediaTransport }) {
     this.resolverClient = resolverClient;
     this.mediaTransport = mediaTransport;
-    this.mediaDirectory = mediaDirectory;
-    this.demoIndex = -1;
-
-    if (!this.resolverClient.enabled) {
-      for (const item of DEMO_ITEMS) {
-        this.mediaTransport.registerLocalItem({
-          id: item.id,
-          mediaPath: path.join(mediaDirectory, item.mediaFile),
-          posterPath: path.join(mediaDirectory, item.posterFile),
-        });
-      }
-    }
   }
 
   async fromResolver(afterId) {
+    if (!this.resolverClient.enabled) {
+      throw new Error("还没有安装内容源插件");
+    }
+
     const queuedItem = await this.resolverClient.next(afterId);
-    if (!queuedItem?.id) throw new Error("队列接口没有返回 id");
+    if (!queuedItem?.id) throw new Error("内容源插件没有返回作品 id");
 
     const resolvedItem =
       queuedItem.media &&
@@ -82,21 +49,12 @@ class QueueService {
     return publicItem(item);
   }
 
-  fromDemo() {
-    this.demoIndex = (this.demoIndex + 1) % DEMO_ITEMS.length;
-    return publicItem(DEMO_ITEMS[this.demoIndex]);
-  }
-
   getInitial() {
-    return this.resolverClient.enabled
-      ? this.fromResolver(null)
-      : Promise.resolve(this.fromDemo());
+    return this.fromResolver(null);
   }
 
   getNext(afterId) {
-    return this.resolverClient.enabled
-      ? this.fromResolver(afterId)
-      : Promise.resolve(this.fromDemo());
+    return this.fromResolver(afterId);
   }
 }
 

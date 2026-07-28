@@ -1,7 +1,7 @@
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { LocalDouyinClient } = require("./local-douyin-client.cjs");
+const { LocalDouyinClient } = require("../plugins/douyin/client.cjs");
 
 const creator = {
   name: "排序测试博主",

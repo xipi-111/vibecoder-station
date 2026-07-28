@@ -26,3 +26,7 @@ When implementing from a selected generated mock, treat that image as the source
 - In creator management, show the total work count alongside the creator count so catalog growth is visible without adding permanent player chrome.
 - Creator management lives in a separate, single-instance, draggable and resizable utility window. It remembers its bounds, does not cover or interrupt playback, and closing it hides only that utility window.
 - For this repository, use the `git` and `gh` CLIs for GitHub operations instead of connector write actions.
+- The player core ships without any built-in content-source plugin. A new installation has no playable source until the user installs a `.vibeplugin` package.
+- Platform catalog, authentication, parsing, update detection, and collection import belong inside independently installable plugins; the core only owns playback, transitions, media proxying, queue arbitration, and plugin lifecycle.
+- The existing Douyin implementation is the first external plugin. Douyin creator import and future platform-specific optimizations must remain inside that plugin rather than returning to the player core.
+- During the personal-use phase, locally installed plugins are treated as trusted code. Preserve an upgrade path to signed, permission-scoped plugins before offering a public plugin ecosystem.
