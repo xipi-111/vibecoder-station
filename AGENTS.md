@@ -22,7 +22,12 @@ When implementing from a selected generated mock, treat that image as the source
 - Upstream Douyin URLs, cookies, authorization headers, and refresh tokens stay in the Electron main process or the resolver backend. The renderer only receives `vibecoder-media://` URLs.
 - The built-in Douyin source may use an app-owned persistent session. Never import, inspect, or copy the user's Chrome cookies.
 - Treat a creator catalog as complete only after pagination returns `has_more=false`. Guest-mode partial results may play, but the hover-only login action must clearly unlock the complete catalog.
+- Persist Douyin catalog throttling and retry deadlines across app restarts. When the unsigned catalog endpoint returns a blocked or empty response, switch to the signed, logged-in creator profile page as the durable latest-work transport instead of repeatedly retrying the blocked endpoint.
 - Treat Douyin image posts as first-class works: play their original soundtrack while advancing through the images, using the same controls and two-surface transition as videos.
 - In creator management, show the total work count alongside the creator count so catalog growth is visible without adding permanent player chrome.
 - Creator management lives in a separate, single-instance, draggable and resizable utility window. It remembers its bounds, does not cover or interrupt playback, and closing it hides only that utility window.
 - For this repository, use the `git` and `gh` CLIs for GitHub operations instead of connector write actions.
+- The player core ships without any built-in content-source plugin. A new installation has no playable source until the user installs a `.vibeplugin` package.
+- Platform catalog, authentication, parsing, update detection, and collection import belong inside independently installable plugins; the core only owns playback, transitions, media proxying, queue arbitration, and plugin lifecycle.
+- The existing Douyin implementation is the first external plugin. Douyin creator import and future platform-specific optimizations must remain inside that plugin rather than returning to the player core.
+- During the personal-use phase, locally installed plugins are treated as trusted code. Preserve an upgrade path to signed, permission-scoped plugins before offering a public plugin ecosystem.

@@ -94,9 +94,9 @@ await waitFor(
   () =>
     evaluate(
       mainClient,
-      `Boolean(document.querySelector('button[aria-label="管理博主"]'))`,
+      `Boolean(document.querySelector('button[aria-label="管理内容源"]'))`,
   ),
-  "播放器的博主管理按钮没有出现",
+  "播放器的内容源管理按钮没有出现",
 );
 await evaluate(
   mainClient,
@@ -139,7 +139,7 @@ const playingBefore = await waitFor(async () => {
 
 await evaluate(
   mainClient,
-  `document.querySelector('button[aria-label="管理博主"]').click()`,
+  `document.querySelector('button[aria-label="管理内容源"]').click()`,
 );
 
 const managerTarget = await waitFor(
@@ -150,7 +150,7 @@ const managerTarget = await waitFor(
         (target.url.endsWith("/manager.html") ||
           target.url.endsWith("manager.html")),
     ),
-  "点击后没有创建博主管理窗口",
+  "点击后没有创建内容源管理窗口",
 );
 const managerClient = await new CdpClient(
   managerTarget.webSocketDebuggerUrl,
@@ -163,10 +163,10 @@ const managerSummary = await waitFor(async () => {
     managerClient,
     `document.querySelector(".manager-titlebar p")?.textContent?.trim()`,
   );
-  return summary?.includes("位博主") && summary?.includes("个作品")
+  return summary?.includes("个插件") && summary?.includes("个作品")
     ? summary
     : null;
-}, "管理窗口没有显示博主数与作品数");
+}, "管理窗口没有显示插件数与作品数");
 
 await delay(1_200);
 const playingAfter = await mediaState();
@@ -222,7 +222,7 @@ await waitFor(
 
 await evaluate(
   mainClient,
-  `document.querySelector('button[aria-label="管理博主"]').click()`,
+  `document.querySelector('button[aria-label="管理内容源"]').click()`,
 );
 await waitFor(
   () =>
@@ -251,7 +251,7 @@ for (const [key, expected] of Object.entries({
 
 await evaluate(
   mainClient,
-  `document.querySelector('button[aria-label="管理博主"]').click()`,
+  `document.querySelector('button[aria-label="管理内容源"]').click()`,
 );
 await delay(250);
 const managerTargetCount = (await targets()).filter(

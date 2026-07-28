@@ -1,5 +1,5 @@
 const { app, net } = require("electron");
-const { DouyinLocalSource } = require("./douyin-local-source.cjs");
+const { DouyinLocalSource } = require("../plugins/douyin/source.cjs");
 
 app.on("window-all-closed", () => {});
 
@@ -10,10 +10,10 @@ function assert(condition, message) {
 app.whenReady().then(async () => {
   try {
     const source = new DouyinLocalSource({ timeoutMs: 25_000 });
-    const result = await source.resolve("7665159402169023419");
+    const result = await source.resolve("7660720061942900473");
 
-    assert(result.id === "7665159402169023419", "作品 ID 不匹配");
-    assert(result.authorName === "AAA麟西", "作者不匹配");
+    assert(result.id === "7660720061942900473", "作品 ID 不匹配");
+    assert(result.authorName === "余多多奢品（上门收）", "作者不匹配");
     assert(result.media?.url?.startsWith("https://"), "缺少 HTTPS 媒体地址");
 
     const response = await net.fetch(result.media.url, {

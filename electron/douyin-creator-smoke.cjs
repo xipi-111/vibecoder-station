@@ -1,8 +1,8 @@
 const { app } = require("electron");
-const { DouyinLocalSource } = require("./douyin-local-source.cjs");
+const { DouyinLocalSource } = require("../plugins/douyin/source.cjs");
 
 const expectedSecUid =
-  "MS4wLjABAAAAk-iM4HsNctFlBevUMddcdHUuQ2hRuy-dSxoboS2j1mIC48MkfFC8uJ9yQC3v7FNL";
+  "MS4wLjABAAAAfmD6yKVDHEEyYtQ908o3jp7Eo-ge0vraIeuTJoxgsaNN5mFFmagrgnLmGerDPth-";
 
 app.on("window-all-closed", () => {});
 
@@ -12,7 +12,7 @@ app.whenReady().then(async () => {
       partition: "douyin-creator-smoke",
     });
     const creator = await source.resolveCreatorProfile(
-      "主页链接：https://v.douyin.com/ADLDPcmuWHU/",
+      "主页链接：https://v.douyin.com/o3Mdz89MkDY/",
     );
     if (creator.secUid !== expectedSecUid) {
       throw new Error(`识别到错误的 secUid：${creator.secUid}`);

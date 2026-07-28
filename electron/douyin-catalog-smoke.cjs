@@ -1,10 +1,14 @@
 const { app } = require("electron");
-const { DouyinLocalSource } = require("./douyin-local-source.cjs");
+const { DouyinLocalSource } = require("../plugins/douyin/source.cjs");
+
+if (process.env.VIBECODER_TEST_USER_DATA) {
+  app.setPath("userData", process.env.VIBECODER_TEST_USER_DATA);
+}
 
 const creator = {
-  name: "AAA麟西",
+  name: "余多多奢品（上门收）",
   secUid:
-    "MS4wLjABAAAAk-iM4HsNctFlBevUMddcdHUuQ2hRuy-dSxoboS2j1mIC48MkfFC8uJ9yQC3v7FNL",
+    "MS4wLjABAAAAfmD6yKVDHEEyYtQ908o3jp7Eo-ge0vraIeuTJoxgsaNN5mFFmagrgnLmGerDPth-",
 };
 
 app.on("window-all-closed", () => {});

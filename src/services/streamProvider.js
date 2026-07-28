@@ -47,17 +47,15 @@ export const streamProvider = {
     return mockStreams[currentIndex];
   },
 
-  async getDouyinStatus() {
+  async listPlugins() {
     const bridge = desktopBridge();
-    return bridge?.getDouyinStatus
-      ? bridge.getDouyinStatus()
-      : { available: false };
+    return bridge?.listPlugins ? bridge.listPlugins() : { plugins: [] };
   },
 
-  async loginDouyin() {
+  async installPlugin() {
     const bridge = desktopBridge();
-    if (!bridge?.loginDouyin) throw new Error("仅桌面应用支持抖音登录");
-    return bridge.loginDouyin();
+    if (!bridge?.installPlugin) throw new Error("仅桌面应用支持安装插件");
+    return bridge.installPlugin();
   },
 
   async closeWindow() {
@@ -67,30 +65,52 @@ export const streamProvider = {
     return true;
   },
 
-  async openCreatorManager() {
+  async openSourceManager() {
     const bridge = desktopBridge();
-    if (!bridge?.openCreatorManager) {
-      throw new Error("仅桌面应用支持独立博主管理窗口");
+    if (!bridge?.openSourceManager) {
+      throw new Error("仅桌面应用支持内容源管理窗口");
     }
-    return bridge.openCreatorManager();
+    return bridge.openSourceManager();
   },
 
-  async listCreators() {
+  async getPluginStatus(pluginId) {
     const bridge = desktopBridge();
-    return bridge?.listCreators
-      ? bridge.listCreators()
-      : { available: false, creators: [] };
+    return bridge?.getPluginStatus
+      ? bridge.getPluginStatus(pluginId)
+      : { available: false };
   },
 
-  async addCreator(input) {
+  async loginPlugin(pluginId) {
     const bridge = desktopBridge();
-    if (!bridge?.addCreator) throw new Error("仅桌面应用支持博主管理");
-    return bridge.addCreator(input);
+    if (!bridge?.loginPlugin) throw new Error("仅桌面应用支持插件登录");
+    return bridge.loginPlugin(pluginId);
   },
 
-  async removeCreator(secUid) {
+  async listCollections(pluginId) {
     const bridge = desktopBridge();
-    if (!bridge?.removeCreator) throw new Error("仅桌面应用支持博主管理");
-    return bridge.removeCreator(secUid);
+    return bridge?.listCollections
+      ? bridge.listCollections(pluginId)
+      : { available: false, items: [] };
+  },
+
+  async addCollection(pluginId, input) {
+    const bridge = desktopBridge();
+    if (!bridge?.addCollection) throw new Error("仅桌面应用支持内容源配置");
+    return bridge.addCollection(pluginId, input);
+  },
+
+  async removeCollection(pluginId, collectionId) {
+    const bridge = desktopBridge();
+    if (!bridge?.removeCollection) {
+      throw new Error("仅桌面应用支持内容源配置");
+    }
+    return bridge.removeCollection(pluginId, collectionId);
+  },
+
+  onPluginsChanged(callback) {
+    const bridge = desktopBridge();
+    return bridge?.onPluginsChanged
+      ? bridge.onPluginsChanged(callback)
+      : () => undefined;
   },
 };

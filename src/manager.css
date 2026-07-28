@@ -73,6 +73,7 @@ button {
 }
 
 .manager-close,
+.manager-install,
 .manager-add-form button,
 .manager-login,
 .manager-creator button {
@@ -84,6 +85,13 @@ button {
   -webkit-app-region: no-drag;
 }
 
+.manager-title-actions {
+  display: flex;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.manager-install,
 .manager-close {
   display: grid;
   width: 34px;
@@ -92,6 +100,7 @@ button {
   border-radius: 999px;
 }
 
+.manager-install:hover:not(:disabled),
 .manager-close:hover,
 .manager-add-form button:hover:not(:disabled),
 .manager-login:hover:not(:disabled),
@@ -100,6 +109,7 @@ button {
   background: rgba(255, 255, 255, 0.15);
 }
 
+.manager-install:focus-visible,
 .manager-close:focus-visible,
 .manager-add-form button:focus-visible,
 .manager-login:focus-visible,
@@ -108,12 +118,118 @@ button {
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.78);
 }
 
+.manager-install:disabled {
+  cursor: wait;
+  opacity: 0.48;
+}
+
 .manager-content {
   display: grid;
   min-height: 0;
   grid-template-rows: auto auto auto minmax(0, 1fr);
   gap: 14px;
   padding: 18px;
+}
+
+.plugin-list {
+  display: grid;
+  max-height: 126px;
+  gap: 7px;
+  overflow: auto;
+}
+
+.plugin-card {
+  display: flex;
+  width: 100%;
+  min-height: 52px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  color: rgba(255, 255, 255, 0.68);
+  text-align: left;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 13px;
+  cursor: pointer;
+}
+
+.plugin-card:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.plugin-card-active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.105);
+  border-color: rgba(255, 255, 255, 0.19);
+}
+
+.plugin-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.plugin-card > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.plugin-card strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-card small {
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-empty {
+  display: grid;
+  min-height: 280px;
+  place-content: center;
+  justify-items: center;
+  padding: 24px;
+  color: rgba(255, 255, 255, 0.48);
+  text-align: center;
+}
+
+.plugin-empty p,
+.plugin-empty span {
+  margin: 0;
+}
+
+.plugin-empty p {
+  margin-top: 14px;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.plugin-empty span {
+  max-width: 270px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.plugin-empty button {
+  min-height: 38px;
+  margin-top: 18px;
+  padding: 0 16px;
+  color: #111;
+  background: #fff;
+  border: 0;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .manager-status-row {

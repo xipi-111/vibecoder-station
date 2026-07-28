@@ -1,0 +1,18 @@
+{
+  "pollIntervalMinutes": 15,
+  "creators": [
+    {
+      "name": "余多多奢品（上门收）",
+      "secUid": "MS4wLjABAAAAfmD6yKVDHEEyYtQ908o3jp7Eo-ge0vraIeuTJoxgsaNN5mFFmagrgnLmGerDPth-",
+      "shareUrl": "https://v.douyin.com/o3Mdz89MkDY/"
+    }
+  ],
+  "seedVideos": [
+    {
+      "id": "7660720061942900473",
+      "authorName": "余多多奢品（上门收）",
+      "authorId": "MS4wLjABAAAAfmD6yKVDHEEyYtQ908o3jp7Eo-ge0vraIeuTJoxgsaNN5mFFmagrgnLmGerDPth-",
+      "shareUrl": "https://www.douyin.com/video/7660720061942900473"
+    }
+  ]
+}
