@@ -15,6 +15,8 @@ import { streamProvider } from "./services/streamProvider.js";
 
 const HIDE_DELAY_MS = 800;
 const SPEEDS = [0.75, 1, 1.25, 1.5];
+const PREFETCH_TIMEOUT_MS = 8_000;
+const PREFETCH_ATTEMPTS = 3;
 
 function IconButton({ label, className = "", children, ...props }) {
   return (
@@ -29,7 +31,7 @@ function IconButton({ label, className = "", children, ...props }) {
   );
 }
 
-function waitForPlayable(media, timeoutMs = 15_000) {
+function waitForPlayable(media, timeoutMs = PREFETCH_TIMEOUT_MS) {
   if (media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
     return Promise.resolve();
   }
@@ -58,7 +60,7 @@ function waitForPlayable(media, timeoutMs = 15_000) {
   });
 }
 
-function waitForImage(image, timeoutMs = 15_000) {
+function waitForImage(image, timeoutMs = PREFETCH_TIMEOUT_MS) {
   if (!image || (image.complete && image.naturalWidth > 0)) {
     return Promise.resolve();
   }
@@ -160,8 +162,22 @@ export function App() {
 
       const promise = streamProvider
         .getNext(afterId)
-        .then((nextStream) => {
+        .then(async (nextStream) => {
           setSlotStream(targetSlot, nextStream);
+          await nextPaint();
+
+          const nextMedia = mediaElementsRef.current[targetSlot];
+          const nextSurface = surfaceElementsRef.current[targetSlot];
+          if (!nextMedia || !nextSurface) {
+            throw new Error("下一条作品元素尚未就绪");
+          }
+          await Promise.all([
+            waitForPlayable(nextMedia),
+            nextStream.kind === "image"
+              ? waitForImage(imageElementsRef.current[targetSlot])
+              : Promise.resolve(),
+          ]);
+
           return { nextStream, targetSlot };
         })
         .catch((error) => {
@@ -175,6 +191,31 @@ export function App() {
       return promise;
     },
     [setSlotStream],
+  );
+
+  const ensurePlayableNext = useCallback(
+    async (afterId, targetSlot) => {
+      let lastError = null;
+
+      for (
+        let attempt = 1;
+        attempt <= PREFETCH_ATTEMPTS;
+        attempt += 1
+      ) {
+        try {
+          return await prefetchNext(afterId, targetSlot);
+        } catch (error) {
+          lastError = error;
+          console.warn(
+            `[stream] 候选作品预载失败（${attempt}/${PREFETCH_ATTEMPTS}）`,
+            error,
+          );
+        }
+      }
+
+      throw lastError ?? new Error("没有可播放的下一条作品");
+    },
+    [prefetchNext],
   );
 
   useEffect(() => {
@@ -323,10 +364,10 @@ export function App() {
 
   useEffect(() => {
     if (!activeStream?.id) return;
-    prefetchNext(activeStream.id, 1 - activeSlot).catch((error) => {
+    ensurePlayableNext(activeStream.id, 1 - activeSlot).catch((error) => {
       console.error("[stream] 无法预载下一个作品", error);
     });
-  }, [activeSlot, activeStream?.id, prefetchNext]);
+  }, [activeSlot, activeStream?.id, ensurePlayableNext]);
 
   const handleMediaLoaded = useCallback((slotIndex) => {
     const media = mediaElementsRef.current[slotIndex];
@@ -371,23 +412,16 @@ export function App() {
     setSpeedMenuOpen(false);
 
     try {
-      const prefetched = await prefetchNext(
+      const prefetched = await ensurePlayableNext(
         currentStream.id,
         targetSlot,
       );
-      await nextPaint();
 
       const nextMedia = mediaElementsRef.current[prefetched.targetSlot];
       const nextSurface = surfaceElementsRef.current[prefetched.targetSlot];
       if (!nextMedia || !nextSurface) {
         throw new Error("下一条作品元素尚未就绪");
       }
-      await Promise.all([
-        waitForPlayable(nextMedia),
-        prefetched.nextStream.kind === "image"
-          ? waitForImage(imageElementsRef.current[prefetched.targetSlot])
-          : Promise.resolve(),
-      ]);
 
       const settings = playbackSettingsRef.current;
       nextMedia.currentTime = 0;
@@ -456,7 +490,7 @@ export function App() {
     } finally {
       switchingRef.current = false;
     }
-  }, [prefetchNext]);
+  }, [ensurePlayableNext]);
 
   const togglePlayback = useCallback(() => {
     const media = mediaElementsRef.current[activeSlotRef.current];

@@ -5,7 +5,10 @@ const DETAIL_API_PATH = "/aweme/v1/web/aweme/detail";
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_CREATOR_TIMEOUT_MS = 120_000;
 const CATALOG_SESSION_WARMUP_MS = 6_000;
+const CATALOG_REQUEST_TIMEOUT_MS = 12_000;
 const CATALOG_PAGE_DELAY_MS = 600;
+const CATALOG_CREATOR_DELAY_MS = 120;
+const CATALOG_BATCH_CONCURRENCY = 4;
 const MAX_CATALOG_PAGES = 200;
 const MEDIA_FALLBACK_TTL_MS = 5 * 60 * 1_000;
 const LOGIN_COOKIE_NAMES = new Set([
@@ -143,6 +146,49 @@ function uniqueVideoLinks(values) {
   return links;
 }
 
+function catalogResult(
+  videos,
+  { complete = false, reachedKnown = false, truncated = false } = {},
+) {
+  Object.defineProperties(videos, {
+    complete: {
+      value: Boolean(complete),
+      enumerable: false,
+    },
+    reachedKnown: {
+      value: Boolean(reachedKnown),
+      enumerable: false,
+    },
+    truncated: {
+      value: Boolean(truncated),
+      enumerable: false,
+    },
+  });
+  return videos;
+}
+
+function normalizeCatalogVideos(videos, creator) {
+  const discovered = new Map();
+
+  for (const video of videos ?? []) {
+    if (!/^\d{10,24}$/.test(video.id)) continue;
+    if (video.authorId && video.authorId !== creator.secUid) continue;
+    discovered.set(video.id, {
+      id: video.id,
+      url: `https://www.douyin.com/video/${video.id}`,
+      title: video.title,
+      authorName: video.authorName,
+      kind: video.kind,
+      imageCount: video.imageCount,
+      publishedAt: video.createTime
+        ? new Date(video.createTime * 1_000).toISOString()
+        : null,
+    });
+  }
+
+  return discovered;
+}
+
 function extractProfileInput(value) {
   const text = String(value ?? "").trim();
   if (/^MS4wLjAB[A-Za-z0-9_-]+$/.test(text)) {
@@ -244,6 +290,7 @@ class DouyinLocalSource {
     this.creatorTimeoutMs = creatorTimeoutMs;
     this.operation = Promise.resolve();
     this.catalogOperation = Promise.resolve();
+    this.catalogPagePromise = null;
     this.windows = new Set();
     this.loginWindow = null;
   }
@@ -260,7 +307,7 @@ class DouyinLocalSource {
     return result;
   }
 
-  async createPage() {
+  async createPage({ backgroundThrottling = false } = {}) {
     const resolverSession = session.fromPartition(this.partition);
     resolverSession.setPermissionRequestHandler(
       (_webContents, _permission, callback) => callback(false),
@@ -280,7 +327,7 @@ class DouyinLocalSource {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
-        backgroundThrottling: false,
+        backgroundThrottling,
       },
     });
     this.windows.add(window);
@@ -290,6 +337,46 @@ class DouyinLocalSource {
     await window.loadURL("data:text/html,<title>resolver</title>");
 
     return { window, userAgent };
+  }
+
+  async getCatalogPage(creator) {
+    if (this.catalogPagePromise) {
+      const existing = await this.catalogPagePromise;
+      if (!existing.window.isDestroyed()) return existing;
+      this.catalogPagePromise = null;
+    }
+
+    this.catalogPagePromise = (async () => {
+      const page = await this.createPage({
+        backgroundThrottling: true,
+      });
+      try {
+        await Promise.race([
+          page.window
+            .loadURL(
+              `https://www.douyin.com/user/${encodeURIComponent(
+                creator.secUid,
+              )}`,
+              { userAgent: page.userAgent },
+            )
+            .catch(() => undefined),
+          wait(20_000),
+        ]);
+        await wait(CATALOG_SESSION_WARMUP_MS);
+        page.window.once("closed", () => {
+          this.windows.delete(page.window);
+          this.catalogPagePromise = null;
+        });
+        return page;
+      } catch (error) {
+        if (!page.window.isDestroyed()) page.window.destroy();
+        this.windows.delete(page.window);
+        this.catalogPagePromise = null;
+        throw error;
+      }
+    })();
+
+    return this.catalogPagePromise;
   }
 
   async isAuthenticated() {
@@ -492,40 +579,45 @@ class DouyinLocalSource {
     });
   }
 
-  async fetchCreatorVideos(creator) {
+  async fetchCreatorVideos(
+    creator,
+    {
+      maxPages = MAX_CATALOG_PAGES,
+      stopAfterId = null,
+    } = {},
+  ) {
     return this.runCatalogSerially(async () => {
       if (!creator?.secUid) throw new Error("博主配置缺少 secUid");
 
-      const { window, userAgent } = await this.createPage();
+      const pageLimit = Math.max(
+        1,
+        Math.min(MAX_CATALOG_PAGES, Number(maxPages) || 1),
+      );
+      const knownId = /^\d{10,24}$/.test(String(stopAfterId ?? ""))
+        ? String(stopAfterId)
+        : null;
+      const { window } = await this.getCatalogPage(creator);
       const discovered = new Map();
+      const startedAt = Date.now();
+      let cursor = "0";
+      let loginRequired = false;
 
-      try {
-        await Promise.race([
-          window
-            .loadURL(
-              `https://www.douyin.com/user/${encodeURIComponent(
-                creator.secUid,
-              )}`,
-              { userAgent },
-            )
-            .catch(() => undefined),
-          wait(20_000),
-        ]);
-        await wait(CATALOG_SESSION_WARMUP_MS);
+      for (let pageNumber = 0; pageNumber < pageLimit; pageNumber += 1) {
+        if (Date.now() - startedAt > this.creatorTimeoutMs) {
+          throw new Error(
+            `检查博主 ${creator.name ?? creator.secUid} 更新超时`,
+          );
+        }
 
-        const startedAt = Date.now();
-        let cursor = "0";
-        let loginRequired = false;
-
-        for (let pageNumber = 0; pageNumber < MAX_CATALOG_PAGES; pageNumber += 1) {
-          if (Date.now() - startedAt > this.creatorTimeoutMs) {
-            throw new Error(
-              `检查博主 ${creator.name ?? creator.secUid} 更新超时`,
-            );
-          }
-
-          const page = await window.webContents.executeJavaScript(
-            `(async () => {
+        const responsePage = await withTimeout(
+          window.webContents.executeJavaScript(
+          `(async () => {
+              const controller = new AbortController();
+              const timeout = setTimeout(
+                () => controller.abort(),
+                ${CATALOG_REQUEST_TIMEOUT_MS},
+              );
+              try {
               const url =
                 "https://www.douyin.com/aweme/v1/web/aweme/post/?" +
                 new URLSearchParams({
@@ -536,8 +628,18 @@ class DouyinLocalSource {
                   max_cursor: ${JSON.stringify(cursor)},
                   count: "18",
                 });
-              const response = await fetch(url, { credentials: "include" });
-              const data = await response.json();
+              const response = await fetch(url, {
+                credentials: "include",
+                signal: controller.signal,
+              });
+              if (!response.ok) {
+                throw new Error("HTTP " + response.status);
+              }
+              const responseText = await response.text();
+              if (!responseText.trim()) {
+                throw new Error("抖音暂时限制了目录请求");
+              }
+              const data = JSON.parse(responseText);
               return {
                 statusCode: data.status_code,
                 hasMore:
@@ -568,56 +670,286 @@ class DouyinLocalSource {
                     : 0,
                 })),
               };
+              } finally {
+                clearTimeout(timeout);
+              }
             })()`,
             true,
-          );
+          ),
+          CATALOG_REQUEST_TIMEOUT_MS + 2_000,
+          `读取博主 ${creator.name ?? creator.secUid} 的作品超时`,
+        );
 
-          loginRequired ||= page.loginRequired;
-          for (const video of page.videos ?? []) {
-            if (!/^\d{10,24}$/.test(video.id)) continue;
-            if (video.authorId && video.authorId !== creator.secUid) continue;
-            discovered.set(video.id, {
-              id: video.id,
-              url: `https://www.douyin.com/video/${video.id}`,
-              title: video.title,
-              authorName: video.authorName,
-              kind: video.kind,
-              imageCount: video.imageCount,
-              publishedAt: video.createTime
-                ? new Date(video.createTime * 1_000).toISOString()
-                : null,
-            });
-          }
-
-          if (page.hasMore === false) return [...discovered.values()];
-          if (
-            page.hasMore === null ||
-            !page.nextCursor ||
-            page.nextCursor === cursor
-          ) {
-            if (loginRequired || !(await this.isAuthenticated())) {
-              throw new DouyinLoginRequiredError(
-                creator.name ?? creator.secUid,
-                [...discovered.values()],
-              );
-            }
-            throw new Error(
-              `博主 ${creator.name ?? creator.secUid} 的分页响应不完整；已发现 ${discovered.size} 个作品`,
-            );
-          }
-
-          cursor = page.nextCursor;
-          await wait(CATALOG_PAGE_DELAY_MS);
+        loginRequired ||= responsePage.loginRequired;
+        for (const [id, video] of normalizeCatalogVideos(
+          responsePage.videos,
+          creator,
+        )) {
+          discovered.set(id, video);
         }
 
-        throw new Error(
-          `博主 ${creator.name ?? creator.secUid} 的作品页数超过安全上限`,
-        );
-      } finally {
-        if (!window.isDestroyed()) window.destroy();
-        this.windows.delete(window);
+        if (responsePage.hasMore === false) {
+          await wait(CATALOG_CREATOR_DELAY_MS);
+          return catalogResult([...discovered.values()], {
+            complete: true,
+          });
+        }
+        if (knownId && discovered.has(knownId)) {
+          await wait(CATALOG_CREATOR_DELAY_MS);
+          return catalogResult([...discovered.values()], {
+            reachedKnown: true,
+          });
+        }
+        if (
+          responsePage.hasMore === null ||
+          !responsePage.nextCursor ||
+          responsePage.nextCursor === cursor
+        ) {
+          if (loginRequired || !(await this.isAuthenticated())) {
+            throw new DouyinLoginRequiredError(
+              creator.name ?? creator.secUid,
+              [...discovered.values()],
+            );
+          }
+          throw new Error(
+            `博主 ${creator.name ?? creator.secUid} 的分页响应不完整；已发现 ${discovered.size} 个作品`,
+          );
+        }
+
+        cursor = responsePage.nextCursor;
+        await wait(CATALOG_PAGE_DELAY_MS);
       }
+
+      if (pageLimit < MAX_CATALOG_PAGES) {
+        await wait(CATALOG_CREATOR_DELAY_MS);
+        return catalogResult([...discovered.values()], {
+          truncated: true,
+        });
+      }
+
+      throw new Error(
+        `博主 ${creator.name ?? creator.secUid} 的作品页数超过安全上限`,
+      );
     });
+  }
+
+  async fetchCreatorLatestBatch(
+    creators,
+    {
+      stopAfterIds = {},
+      concurrency = CATALOG_BATCH_CONCURRENCY,
+    } = {},
+  ) {
+    return this.runCatalogSerially(async () => {
+      const validCreators = (creators ?? []).filter(
+        (creator) => creator?.secUid,
+      );
+      if (!validCreators.length) return [];
+
+      const workerCount = Math.max(
+        1,
+        Math.min(
+          CATALOG_BATCH_CONCURRENCY,
+          Number(concurrency) || 1,
+          validCreators.length,
+        ),
+      );
+      const requests = validCreators.map((creator) => ({
+        secUid: creator.secUid,
+        knownId: /^\d{10,24}$/.test(
+          String(stopAfterIds[creator.secUid] ?? ""),
+        )
+          ? String(stopAfterIds[creator.secUid])
+          : null,
+      }));
+      const { window } = await this.getCatalogPage(validCreators[0]);
+      const requestBudget =
+        Math.ceil(requests.length / workerCount) *
+          CATALOG_REQUEST_TIMEOUT_MS +
+        3_000;
+
+      const responsePages = await withTimeout(
+        window.webContents.executeJavaScript(
+          `(async () => {
+            const requests = ${JSON.stringify(requests)};
+            const results = new Array(requests.length);
+            let nextIndex = 0;
+            let throttledMessage = null;
+
+            const fetchOne = async (request) => {
+              const controller = new AbortController();
+              const timeout = setTimeout(
+                () => controller.abort(),
+                ${CATALOG_REQUEST_TIMEOUT_MS},
+              );
+              try {
+                const url =
+                  "https://www.douyin.com/aweme/v1/web/aweme/post/?" +
+                  new URLSearchParams({
+                    device_platform: "webapp",
+                    aid: "6383",
+                    channel: "channel_pc_web",
+                    sec_user_id: request.secUid,
+                    max_cursor: "0",
+                    count: "18",
+                  });
+                const response = await fetch(url, {
+                  credentials: "include",
+                  signal: controller.signal,
+                });
+                if (response.status === 403 || response.status === 429) {
+                  return {
+                    error: "抖音暂时限制了目录请求",
+                    throttled: true,
+                  };
+                }
+                if (!response.ok) {
+                  throw new Error("HTTP " + response.status);
+                }
+                const responseText = await response.text();
+                if (!responseText.trim()) {
+                  return {
+                    error: "抖音暂时限制了目录请求",
+                    throttled: true,
+                  };
+                }
+                let data;
+                try {
+                  data = JSON.parse(responseText);
+                } catch {
+                  return {
+                    error: "抖音目录响应无法解析",
+                    throttled: true,
+                  };
+                }
+                return {
+                  statusCode: data.status_code,
+                  hasMore:
+                    Object.prototype.hasOwnProperty.call(data, "has_more")
+                      ? Boolean(data.has_more)
+                      : null,
+                  nextCursor:
+                    data.max_cursor === undefined ||
+                    data.max_cursor === null
+                      ? null
+                      : String(data.max_cursor),
+                  loginRequired: Boolean(
+                    data.not_login_module?.guide_login_tip_exist,
+                  ),
+                  videos: (data.aweme_list || []).map((aweme) => ({
+                    id: String(aweme.aweme_id || ""),
+                    title: aweme.desc || "",
+                    authorId: aweme.author?.sec_uid || "",
+                    authorName: aweme.author?.nickname || "",
+                    createTime: aweme.create_time || null,
+                    kind:
+                      Number(aweme.aweme_type) === 68 ||
+                      (Array.isArray(aweme.images) &&
+                        aweme.images.length > 0)
+                        ? "image"
+                        : "video",
+                    imageCount: Array.isArray(aweme.images)
+                      ? aweme.images.length
+                      : 0,
+                  })),
+                };
+              } catch (error) {
+                return {
+                  error:
+                    error?.name === "AbortError"
+                      ? "请求超时"
+                      : error?.message || String(error),
+                };
+              } finally {
+                clearTimeout(timeout);
+              }
+            };
+
+            const worker = async () => {
+              while (nextIndex < requests.length) {
+                const index = nextIndex;
+                nextIndex += 1;
+                if (throttledMessage) {
+                  results[index] = {
+                    error: throttledMessage,
+                    throttled: true,
+                  };
+                  continue;
+                }
+                const result = await fetchOne(requests[index]);
+                results[index] = result;
+                if (result.throttled) {
+                  throttledMessage = result.error;
+                }
+              }
+            };
+
+            await Promise.all(
+              Array.from(
+                { length: ${workerCount} },
+                () => worker(),
+              ),
+            );
+            return results;
+          })()`,
+          true,
+        ),
+        requestBudget,
+        "批量读取抖音博主作品超时",
+      );
+
+      return validCreators.map((creator, index) => {
+        const page = responsePages[index] ?? {};
+        if (page.error) {
+          return {
+            creator,
+            videos: catalogResult([]),
+            error: page.error,
+            loginRequired: false,
+            throttled: Boolean(page.throttled),
+          };
+        }
+
+        const videos = [
+          ...normalizeCatalogVideos(page.videos, creator).values(),
+        ];
+        const knownId = requests[index].knownId;
+        const reachedKnown = Boolean(
+          knownId && videos.some((video) => video.id === knownId),
+        );
+        const complete = page.hasMore === false;
+        const malformed =
+          page.hasMore === null ||
+          (page.hasMore && !page.nextCursor);
+
+        return {
+          creator,
+          videos: catalogResult(videos, {
+            complete,
+            reachedKnown,
+            truncated: !complete && !reachedKnown,
+          }),
+          error:
+            malformed && !page.loginRequired
+              ? "抖音返回的目录响应不完整"
+              : null,
+          loginRequired: Boolean(page.loginRequired),
+          throttled: Boolean(page.throttled),
+        };
+      });
+    });
+  }
+
+  close() {
+    if (this.loginWindow && !this.loginWindow.isDestroyed()) {
+      this.loginWindow.destroy();
+    }
+    this.loginWindow = null;
+    this.catalogPagePromise = null;
+    for (const window of this.windows) {
+      if (!window.isDestroyed()) window.destroy();
+    }
+    this.windows.clear();
   }
 
   async resolve(videoId) {

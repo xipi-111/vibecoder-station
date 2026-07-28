@@ -1,6 +1,10 @@
 const { app } = require("electron");
 const { DouyinLocalSource } = require("../plugins/douyin/source.cjs");
 
+if (process.env.VIBECODER_TEST_USER_DATA) {
+  app.setPath("userData", process.env.VIBECODER_TEST_USER_DATA);
+}
+
 const creator = {
   name: "余多多奢品（上门收）",
   secUid:

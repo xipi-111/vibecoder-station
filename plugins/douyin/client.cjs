@@ -3,6 +3,11 @@ const path = require("node:path");
 
 const DEFAULT_POLL_MINUTES = 15;
 const MAX_RECENT_ITEMS = 20;
+const FAST_SYNC_CREATOR_THRESHOLD = 12;
+const FAST_SYNC_PAGE_LIMIT = 1;
+const FAST_SYNC_BATCH_SIZE = 4;
+const FAST_SYNC_SLICE_DELAY_MS = 30_000;
+const FAST_SYNC_THROTTLED_RETRY_MS = 5 * 60_000;
 
 function compareVideoIdsDescending(left, right) {
   const leftId = BigInt(left.id);
@@ -32,13 +37,18 @@ class LocalDouyinClient {
       pendingNewIds: [],
       recentIds: [],
       creatorHighWaterMarks: {},
+      catalogCompleteCreatorIds: [],
+      refreshCursor: 0,
     };
     this.initialization = null;
     this.refreshPromise = null;
     this.pollTimer = null;
+    this.sliceTimer = null;
     this.authRequired = false;
     this.partialCount = 0;
     this.lastRefreshError = null;
+    this.syncProcessed = 0;
+    this.syncTotal = 0;
 
     for (const item of this.activeSeedVideos()) {
       this.items.set(item.id, { ...item, rank: Number.MAX_SAFE_INTEGER });
@@ -86,6 +96,8 @@ class LocalDouyinClient {
       pendingNewIds: [],
       recentIds: [],
       creatorHighWaterMarks: {},
+      catalogCompleteCreatorIds: [],
+      refreshCursor: 0,
     };
     this.authRequired = false;
     this.partialCount = 0;
@@ -108,6 +120,14 @@ class LocalDouyinClient {
           !Array.isArray(stored.creatorHighWaterMarks)
             ? stored.creatorHighWaterMarks
             : {},
+        catalogCompleteCreatorIds: Array.isArray(
+          stored.catalogCompleteCreatorIds,
+        )
+          ? stored.catalogCompleteCreatorIds
+          : [],
+        refreshCursor: Number.isInteger(stored.refreshCursor)
+          ? Math.max(0, stored.refreshCursor)
+          : 0,
       };
 
       for (const id of this.state.knownIds) {
@@ -149,84 +169,215 @@ class LocalDouyinClient {
     return this.initialization;
   }
 
+  registerCreatorVideos(
+    creator,
+    videos,
+    { known, pending, creatorHighWaterMarks },
+  ) {
+    const previousHighWater =
+      creatorHighWaterMarks[creator.secUid] ?? null;
+    const latestVideo = [...videos].sort(compareVideoIdsDescending)[0];
+    let configChanged = false;
+
+    const resolvedName = videos.find((video) => video.authorName)?.authorName;
+    if (resolvedName && resolvedName !== creator.name) {
+      creator.name = resolvedName;
+      configChanged = true;
+    }
+
+    videos.forEach((video, rank) => {
+      this.items.set(video.id, {
+        ...video,
+        authorName: creator.name,
+        authorId: creator.secUid,
+        rank,
+      });
+
+      if (!known.has(video.id)) {
+        known.add(video.id);
+        if (
+          previousHighWater
+            ? isVideoIdNewer(video.id, previousHighWater)
+            : video.id === latestVideo?.id
+        ) {
+          pending.add(video.id);
+        }
+      }
+    });
+
+    if (
+      latestVideo &&
+      isVideoIdNewer(latestVideo.id, previousHighWater)
+    ) {
+      creatorHighWaterMarks[creator.secUid] = latestVideo.id;
+    }
+
+    return configChanged;
+  }
+
+  updateStoredRefreshState({
+    known,
+    pending,
+    creatorHighWaterMarks,
+    catalogCompleteCreatorIds,
+  }) {
+    this.state.knownIds = [...known];
+    this.state.pendingNewIds = [...pending];
+    this.state.creatorHighWaterMarks = creatorHighWaterMarks;
+    this.state.catalogCompleteCreatorIds = [
+      ...catalogCompleteCreatorIds,
+    ];
+  }
+
   async refresh() {
     if (this.refreshPromise) return this.refreshPromise;
+    if (this.sliceTimer) {
+      clearTimeout(this.sliceTimer);
+      this.sliceTimer = null;
+    }
 
     this.refreshPromise = (async () => {
+      const configuredCreators = this.config.creators ?? [];
+      const fastSync =
+        configuredCreators.length >= FAST_SYNC_CREATOR_THRESHOLD;
+      const storedCursor = fastSync
+        ? Math.min(
+            this.state.refreshCursor ?? 0,
+            Math.max(0, configuredCreators.length - 1),
+          )
+        : 0;
+      const creators = fastSync
+        ? configuredCreators.slice(
+            storedCursor,
+            storedCursor + FAST_SYNC_BATCH_SIZE,
+          )
+        : configuredCreators;
       const known = new Set(this.state.knownIds);
       const pending = new Set(this.state.pendingNewIds);
       const creatorHighWaterMarks = {
         ...this.state.creatorHighWaterMarks,
       };
+      const activeCreatorIds = new Set(
+        configuredCreators.map((creator) => creator.secUid),
+      );
+      const catalogCompleteCreatorIds = new Set(
+        (this.state.catalogCompleteCreatorIds ?? []).filter((id) =>
+          activeCreatorIds.has(id),
+        ),
+      );
       let authRequired = false;
       let partialCount = 0;
       let lastRefreshError = null;
       let configChanged = false;
+      let throttled = false;
+      this.syncProcessed = storedCursor;
+      this.syncTotal = configuredCreators.length;
 
-      const registerCreatorVideos = (creator, videos) => {
-        const previousHighWater =
-          creatorHighWaterMarks[creator.secUid] ?? null;
-        const latestVideo = [...videos].sort(compareVideoIdsDescending)[0];
-
-        videos.forEach((video, rank) => {
-          this.items.set(video.id, {
-            ...video,
-            authorName: creator.name,
-            authorId: creator.secUid,
-            rank,
-          });
-
-          if (!known.has(video.id)) {
-            known.add(video.id);
-            if (
-              previousHighWater
-                ? isVideoIdNewer(video.id, previousHighWater)
-                : video.id === latestVideo?.id
-            ) {
-              pending.add(video.id);
-            }
-          }
-        });
-
-        if (
-          latestVideo &&
-          isVideoIdNewer(latestVideo.id, previousHighWater)
-        ) {
-          creatorHighWaterMarks[creator.secUid] = latestVideo.id;
+      const registerResult = (creator, videos) => {
+        configChanged =
+          this.registerCreatorVideos(creator, videos, {
+            known,
+            pending,
+            creatorHighWaterMarks,
+          }) || configChanged;
+        if (videos.complete) {
+          catalogCompleteCreatorIds.add(creator.secUid);
+        } else if (!catalogCompleteCreatorIds.has(creator.secUid)) {
+          partialCount += videos.length;
         }
       };
 
-      for (const creator of this.config.creators ?? []) {
-        try {
-          const videos = await this.source.fetchCreatorVideos(creator);
-          const resolvedName = videos.find(
-            (video) => video.authorName,
-          )?.authorName;
-          if (resolvedName && resolvedName !== creator.name) {
-            creator.name = resolvedName;
-            configChanged = true;
-          }
-          registerCreatorVideos(creator, videos);
-        } catch (error) {
-          if (
-            error?.code === "DOUYIN_LOGIN_REQUIRED" &&
-            Array.isArray(error.partialVideos)
-          ) {
-            authRequired = true;
-            partialCount += error.partialVideos.length;
-            error.partialVideos.forEach((video) => {
-              if (video.authorName && video.authorName !== creator.name) {
-                creator.name = video.authorName;
-                configChanged = true;
-              }
-            });
-            registerCreatorVideos(creator, error.partialVideos);
-          }
-          lastRefreshError = error;
-          console.warn(
-            `[douyin-queue] 检查 ${creator.name ?? creator.secUid} 失败`,
-            error?.message ?? error,
+      const registerFailure = (creator, error) => {
+        lastRefreshError =
+          error instanceof Error ? error : new Error(String(error));
+        console.warn(
+          `[douyin-queue] 检查 ${creator.name ?? creator.secUid} 失败`,
+          lastRefreshError.message,
+        );
+      };
+
+      const persistProgress = async () => {
+        this.updateStoredRefreshState({
+          known,
+          pending,
+          creatorHighWaterMarks,
+          catalogCompleteCreatorIds,
+        });
+        await this.saveState();
+      };
+
+      if (
+        fastSync &&
+        typeof this.source.fetchCreatorLatestBatch === "function"
+      ) {
+        for (
+          let offset = 0;
+          offset < creators.length;
+          offset += FAST_SYNC_BATCH_SIZE
+        ) {
+          const batch = creators.slice(
+            offset,
+            offset + FAST_SYNC_BATCH_SIZE,
           );
+          try {
+            const results = await this.source.fetchCreatorLatestBatch(
+              batch,
+              {
+                stopAfterIds: creatorHighWaterMarks,
+                concurrency: 1,
+              },
+            );
+            for (const result of results) {
+              throttled ||= Boolean(result.throttled);
+              if (result.loginRequired) authRequired = true;
+              if (!result.error || result.videos.length) {
+                registerResult(result.creator, result.videos);
+              }
+              if (result.error) {
+                registerFailure(result.creator, result.error);
+              }
+            }
+          } catch (error) {
+            for (const creator of batch) {
+              registerFailure(creator, error);
+            }
+          } finally {
+            if (!throttled) {
+              this.syncProcessed += batch.length;
+            }
+            await persistProgress();
+          }
+        }
+      } else {
+        for (const creator of creators) {
+          try {
+            const videos = await this.source.fetchCreatorVideos(
+              creator,
+              fastSync
+                ? {
+                    maxPages: FAST_SYNC_PAGE_LIMIT,
+                    stopAfterId:
+                      creatorHighWaterMarks[creator.secUid] ?? null,
+                  }
+                : undefined,
+            );
+            registerResult(creator, videos);
+          } catch (error) {
+            if (
+              error?.code === "DOUYIN_LOGIN_REQUIRED" &&
+              Array.isArray(error.partialVideos)
+            ) {
+              authRequired = true;
+              partialCount += error.partialVideos.length;
+              registerResult(creator, error.partialVideos);
+            }
+            registerFailure(creator, error);
+          } finally {
+            this.syncProcessed += 1;
+            if (fastSync) {
+              await persistProgress();
+            }
+          }
         }
       }
 
@@ -237,14 +388,34 @@ class LocalDouyinClient {
         }
       }
 
-      this.state.knownIds = [...known];
-      this.state.pendingNewIds = [...pending];
-      this.state.creatorHighWaterMarks = creatorHighWaterMarks;
+      this.updateStoredRefreshState({
+        known,
+        pending,
+        creatorHighWaterMarks,
+        catalogCompleteCreatorIds,
+      });
       this.authRequired = authRequired;
       this.partialCount = partialCount;
       this.lastRefreshError = lastRefreshError?.message ?? null;
+      if (fastSync) {
+        const reachedEnd =
+          storedCursor + creators.length >= configuredCreators.length;
+        this.state.refreshCursor = throttled
+          ? storedCursor
+          : reachedEnd
+            ? 0
+            : storedCursor + creators.length;
+      }
       if (configChanged) await this.saveConfig();
       await this.saveState();
+
+      if (fastSync) {
+        if (throttled) {
+          this.scheduleSliceRefresh(FAST_SYNC_THROTTLED_RETRY_MS);
+        } else if (this.state.refreshCursor > 0) {
+          this.scheduleSliceRefresh(FAST_SYNC_SLICE_DELAY_MS);
+        }
+      }
     })().finally(() => {
       this.refreshPromise = null;
     });
@@ -252,11 +423,29 @@ class LocalDouyinClient {
     return this.refreshPromise;
   }
 
+  scheduleSliceRefresh(delayMs) {
+    if (this.sliceTimer) return;
+    this.sliceTimer = setTimeout(() => {
+      this.sliceTimer = null;
+      this.refresh().catch((error) => {
+        console.warn(
+          "[douyin-queue] 分段检查更新失败，稍后重试",
+          error?.message ?? error,
+        );
+      });
+    }, delayMs);
+    this.sliceTimer.unref();
+  }
+
   async getStatus() {
     return {
       authRequired: this.authRequired,
       authenticated: await this.source.isAuthenticated(),
       refreshing: Boolean(this.refreshPromise),
+      syncProcessed: this.syncProcessed,
+      syncTotal: this.syncTotal,
+      completeCreatorCount:
+        this.state.catalogCompleteCreatorIds?.length ?? 0,
       catalogCount: this.items.size,
       partialCount: this.partialCount,
       message: this.lastRefreshError,
@@ -342,9 +531,15 @@ class LocalDouyinClient {
   }
 
   stopPolling() {
-    if (!this.pollTimer) return;
-    clearInterval(this.pollTimer);
-    this.pollTimer = null;
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (this.sliceTimer) {
+      clearTimeout(this.sliceTimer);
+      this.sliceTimer = null;
+    }
+    this.source.close?.();
   }
 
   async getQueueInfo(afterId) {

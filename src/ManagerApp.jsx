@@ -171,6 +171,12 @@ export function ManagerApp() {
   const authenticated = Boolean(status?.authenticated);
   const refreshing = Boolean(status?.refreshing || collectionBusy);
   const catalogCount = status?.catalogCount;
+  const syncProcessed = Number(status?.syncProcessed) || 0;
+  const syncTotal = Number(status?.syncTotal) || 0;
+  const syncingLabel =
+    syncTotal > 0 && syncProcessed < syncTotal
+      ? `${pluginUi.syncingStatusLabel ?? "正在同步作品"} ${syncProcessed}/${syncTotal}`
+      : pluginUi.syncingStatusLabel ?? "正在同步作品";
   const collectionLabel = pluginUi.collectionLabel ?? "集合";
   const collectionPluralLabel =
     pluginUi.collectionPluralLabel ?? collectionLabel;
@@ -268,7 +274,7 @@ export function ManagerApp() {
                 )}
                 <span>
                   {refreshing
-                    ? pluginUi.syncingStatusLabel ?? "正在同步作品"
+                    ? syncingLabel
                     : authenticated
                       ? pluginUi.authenticatedStatusLabel ?? "已登录"
                       : pluginUi.guestStatusLabel ?? "未登录"}
