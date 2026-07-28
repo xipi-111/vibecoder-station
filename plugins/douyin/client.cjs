@@ -41,6 +41,8 @@ function emptyRateLimitState() {
     lastErrorKind: null,
     lastHttpStatus: null,
     lastMessage: null,
+    verificationRequired: false,
+    verificationAvailable: false,
     totalAttempts: 0,
     totalSuccesses: 0,
     totalThrottles: 0,
@@ -73,6 +75,10 @@ function normalizeRateLimitState(value) {
       : null,
     lastMessage:
       typeof value.lastMessage === "string" ? value.lastMessage : null,
+    verificationRequired: Boolean(value.verificationRequired),
+    verificationAvailable: Boolean(
+      value.verificationAvailable || value.verificationRequired,
+    ),
     totalAttempts: count(value.totalAttempts),
     totalSuccesses: count(value.totalSuccesses),
     totalThrottles: count(value.totalThrottles),
@@ -115,6 +121,8 @@ class LocalDouyinClient {
     this.lastRefreshError = null;
     this.syncProcessed = 0;
     this.syncTotal = 0;
+    this.verificationPromise = null;
+    this.stopped = false;
 
     for (const item of this.activeSeedVideos()) {
       this.items.set(item.id, { ...item, rank: Number.MAX_SAFE_INTEGER });
@@ -277,6 +285,8 @@ class LocalDouyinClient {
       lastErrorKind: null,
       lastHttpStatus: null,
       lastMessage: null,
+      verificationRequired: false,
+      verificationAvailable: false,
     };
   }
 
@@ -302,6 +312,13 @@ class LocalDouyinClient {
 
     const throttled = attempted.find((result) => result.throttled);
     if (throttled) {
+      const verificationRequired = Boolean(
+        throttled.verificationRequired ||
+          throttled.errorKind === "human_verification",
+      );
+      const verificationAvailable = Boolean(
+        verificationRequired || throttled.verificationAvailable,
+      );
       rateLimit.consecutiveFailures += 1;
       rateLimit.lastThrottleAt = this.timestamp();
       rateLimit.lastErrorKind =
@@ -312,21 +329,29 @@ class LocalDouyinClient {
       rateLimit.lastMessage =
         throttled.error ?? "抖音暂时限制了目录请求";
       rateLimit.totalThrottles += 1;
-      const backoffIndex = Math.min(
-        rateLimit.consecutiveFailures - 1,
-        FAST_SYNC_THROTTLE_BACKOFF_MS.length - 1,
-      );
-      const configuredBackoff =
-        FAST_SYNC_THROTTLE_BACKOFF_MS[backoffIndex];
-      const responseBackoff = Math.max(
-        0,
-        Number(throttled.retryAfterMs) || 0,
-      );
-      const delay = Math.max(
-        configuredBackoff,
-        responseBackoff,
-      );
-      rateLimit.nextRetryAt = new Date(this.now() + delay).toISOString();
+      rateLimit.verificationRequired = verificationRequired;
+      rateLimit.verificationAvailable = verificationAvailable;
+      if (verificationRequired) {
+        rateLimit.nextRetryAt = null;
+      } else {
+        const backoffIndex = Math.min(
+          rateLimit.consecutiveFailures - 1,
+          FAST_SYNC_THROTTLE_BACKOFF_MS.length - 1,
+        );
+        const configuredBackoff =
+          FAST_SYNC_THROTTLE_BACKOFF_MS[backoffIndex];
+        const responseBackoff = Math.max(
+          0,
+          Number(throttled.retryAfterMs) || 0,
+        );
+        const delay = Math.max(
+          configuredBackoff,
+          responseBackoff,
+        );
+        rateLimit.nextRetryAt = new Date(
+          this.now() + delay,
+        ).toISOString();
+      }
     } else if (successful.length || failed) {
       rateLimit.consecutiveFailures = 0;
       rateLimit.nextRetryAt = null;
@@ -336,6 +361,8 @@ class LocalDouyinClient {
         ? failed.httpStatus
         : null;
       rateLimit.lastMessage = failed?.error ?? null;
+      rateLimit.verificationRequired = false;
+      rateLimit.verificationAvailable = false;
     }
 
     this.state.rateLimit = rateLimit;
@@ -404,6 +431,13 @@ class LocalDouyinClient {
 
   async refresh({ ignoreBackoff = false } = {}) {
     if (this.refreshPromise) return this.refreshPromise;
+    if (
+      !ignoreBackoff &&
+      this.state.rateLimit?.verificationRequired
+    ) {
+      this.beginHumanVerification();
+      return;
+    }
     const retryDelay = this.rateLimitDelayRemaining();
     if (!ignoreBackoff && retryDelay > 0) {
       this.scheduleSliceRefresh(retryDelay);
@@ -549,6 +583,10 @@ class LocalDouyinClient {
                 httpStatus: error?.httpStatus,
                 retryAfterMs: error?.retryAfterMs,
                 throttled: Boolean(error?.throttled),
+                verificationRequired:
+                  Boolean(error?.verificationRequired),
+                verificationAvailable:
+                  Boolean(error?.verificationAvailable),
               })),
             );
             throttled ||= Boolean(error?.throttled);
@@ -594,6 +632,10 @@ class LocalDouyinClient {
               httpStatus: error?.httpStatus,
               retryAfterMs: error?.retryAfterMs,
               throttled: Boolean(error?.throttled),
+              verificationRequired:
+                Boolean(error?.verificationRequired),
+              verificationAvailable:
+                Boolean(error?.verificationAvailable),
             };
             this.recordBatchTelemetry([failure]);
             throttled ||= failure.throttled;
@@ -647,7 +689,16 @@ class LocalDouyinClient {
       if (configChanged) await this.saveConfig();
       await this.saveState();
 
-      if (throttled) {
+      if (this.state.rateLimit.verificationRequired) {
+        this.beginHumanVerification(
+          configuredCreators[
+            Math.min(
+              this.state.refreshCursor ?? 0,
+              Math.max(0, configuredCreators.length - 1),
+            )
+          ],
+        );
+      } else if (throttled) {
         this.scheduleSliceRefresh(this.rateLimitDelayRemaining());
       } else if (fastSync && this.state.refreshCursor > 0) {
         this.scheduleSliceRefresh(
@@ -689,6 +740,71 @@ class LocalDouyinClient {
     this.sliceTimer.unref();
   }
 
+  beginHumanVerification(creator = null, { force = false } = {}) {
+    if (this.verificationPromise) return this.verificationPromise;
+    if (typeof this.source.openVerificationWindow !== "function") {
+      return Promise.resolve({
+        completed: false,
+        verificationRequired: true,
+      });
+    }
+    const configuredCreators = this.config.creators ?? [];
+    const selectedCreator =
+      creator ??
+      configuredCreators[
+        Math.min(
+          this.state.refreshCursor ?? 0,
+          Math.max(0, configuredCreators.length - 1),
+        )
+      ] ??
+      configuredCreators[0];
+    if (!selectedCreator) {
+      return Promise.resolve({
+        completed: false,
+        verificationRequired: true,
+      });
+    }
+
+    const promise = this.source
+      .openVerificationWindow(selectedCreator, { force })
+      .then(async (result) => {
+        if (result?.completed && !result.verificationRequired) {
+          this.lastRefreshError = null;
+          this.clearRateLimit();
+          await this.saveState();
+          if (!this.stopped) {
+            const retryTimer = setTimeout(() => {
+              this.refresh({ ignoreBackoff: true }).catch((error) => {
+                console.warn(
+                  "[douyin-queue] 验证后的目录刷新失败",
+                  error,
+                );
+              });
+            }, 0);
+            retryTimer.unref();
+          }
+        }
+        return result;
+      })
+      .catch((error) => {
+        console.warn(
+          "[douyin-queue] 无法打开真人验证窗口",
+          error?.message ?? error,
+        );
+        return {
+          completed: false,
+          verificationRequired: true,
+        };
+      });
+    this.verificationPromise = promise;
+    promise.finally(() => {
+      if (this.verificationPromise === promise) {
+        this.verificationPromise = null;
+      }
+    });
+    return promise;
+  }
+
   async getStatus() {
     const retryInMs = this.rateLimitDelayRemaining();
     const rateLimit = normalizeRateLimitState(this.state.rateLimit);
@@ -696,7 +812,12 @@ class LocalDouyinClient {
       authRequired: this.authRequired,
       authenticated: await this.source.isAuthenticated(),
       refreshing: Boolean(this.refreshPromise),
-      throttled: retryInMs > 0,
+      throttled:
+        retryInMs > 0 || rateLimit.verificationRequired,
+      verificationRequired: rateLimit.verificationRequired,
+      verificationAvailable: rateLimit.verificationAvailable,
+      verificationWindowOpen:
+        (await this.source.isVerificationWindowOpen?.()) ?? false,
       retryAt: retryInMs > 0 ? rateLimit.nextRetryAt : null,
       retryInMs,
       lastAttemptAt: rateLimit.lastAttemptAt,
@@ -715,13 +836,26 @@ class LocalDouyinClient {
       catalogCount: this.items.size,
       partialCount: this.partialCount,
       message:
-        retryInMs > 0
+        rateLimit.verificationRequired
+          ? rateLimit.lastMessage ?? "抖音需要先完成人机验证"
+          : retryInMs > 0
           ? rateLimit.lastMessage ?? "抖音目录同步正在退避"
           : this.lastRefreshError,
     };
   }
 
   async login() {
+    if (this.state.rateLimit?.verificationRequired) {
+      await this.beginHumanVerification();
+      return this.getStatus();
+    }
+    if (
+      this.state.rateLimit?.verificationAvailable &&
+      this.rateLimitDelayRemaining() > 0
+    ) {
+      await this.beginHumanVerification(null, { force: true });
+      return this.getStatus();
+    }
     const result = await this.source.openLoginWindow();
     if (result.authenticated) {
       this.authRequired = false;
@@ -786,6 +920,7 @@ class LocalDouyinClient {
 
   startPolling() {
     if (this.pollTimer) return;
+    this.stopped = false;
 
     const configuredMinutes = Number(this.config.pollIntervalMinutes);
     const minutes =
@@ -802,6 +937,7 @@ class LocalDouyinClient {
   }
 
   stopPolling() {
+    this.stopped = true;
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;

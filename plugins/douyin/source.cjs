@@ -296,19 +296,27 @@ class DouyinCatalogRequestError extends Error {
       httpStatus = null,
       retryAfterMs = null,
       throttled = false,
+      verificationRequired = false,
+      verificationAvailable = false,
     } = {},
   ) {
     super(message);
     this.name = "DouyinCatalogRequestError";
-    this.code = throttled
-      ? "DOUYIN_RATE_LIMITED"
-      : "DOUYIN_CATALOG_REQUEST_FAILED";
+    this.code = verificationRequired
+      ? "DOUYIN_HUMAN_VERIFICATION"
+      : throttled
+        ? "DOUYIN_RATE_LIMITED"
+        : "DOUYIN_CATALOG_REQUEST_FAILED";
     this.errorKind = errorKind;
     this.httpStatus = Number.isInteger(httpStatus) ? httpStatus : null;
     this.retryAfterMs = Number.isFinite(Number(retryAfterMs))
       ? Math.max(0, Number(retryAfterMs))
       : null;
     this.throttled = Boolean(throttled);
+    this.verificationRequired = Boolean(verificationRequired);
+    this.verificationAvailable = Boolean(
+      verificationAvailable || verificationRequired,
+    );
   }
 }
 
@@ -327,6 +335,7 @@ class DouyinLocalSource {
     this.preferProfileCatalog = false;
     this.windows = new Set();
     this.loginWindow = null;
+    this.verificationPromise = null;
   }
 
   runSerially(task) {
@@ -411,6 +420,188 @@ class DouyinLocalSource {
     })();
 
     return this.catalogPagePromise;
+  }
+
+  async detectHumanVerification(pageContext) {
+    const window = pageContext?.window;
+    if (!window || window.isDestroyed()) {
+      return { required: false, available: false, reason: null };
+    }
+
+    try {
+      const result = await withTimeout(
+        window.webContents.executeJavaScript(
+          `(() => {
+            const isVisible = (element) => {
+              const style = getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return (
+                style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                Number(style.opacity || 1) > 0 &&
+                rect.width >= 80 &&
+                rect.height >= 40
+              );
+            };
+            const urlPattern =
+              /(rc-verifycenter|verifycenter|rmc-nocaptcha|\\/captcha\\/|verify\\.snssdk|secsdk-captcha)/i;
+            const frames = [...document.querySelectorAll("iframe[src]")];
+            const challengeFrame = frames.find((frame) =>
+              urlPattern.test(frame.src),
+            );
+            const visibleChallengeFrame = frames.find(
+              (frame) => isVisible(frame) && urlPattern.test(frame.src),
+            );
+            const challengeUrl = [location.href].find((url) =>
+              urlPattern.test(url),
+            );
+            const challengeElements = [
+              ...document.querySelectorAll(
+                '[class*="captcha" i], [id*="captcha" i], ' +
+                '[class*="verify" i], [id*="verify" i]',
+              ),
+            ].filter(isVisible);
+            const challengeText = challengeElements
+              .map((element) =>
+                (
+                  element.innerText ||
+                  element.getAttribute("aria-label") ||
+                  ""
+                ).trim(),
+              )
+              .join(" ")
+              .slice(0, 2_000);
+            const textChallenge =
+              /(请完成.{0,8}验证|安全验证|真人验证|拖动.{0,8}滑块|按住.{0,8}滑块|验证后继续)/u.test(
+                challengeText,
+              );
+            return {
+              required: Boolean(
+                challengeUrl || visibleChallengeFrame || textChallenge,
+              ),
+              available: Boolean(
+                challengeUrl || challengeFrame || textChallenge,
+              ),
+              reason:
+                challengeUrl || visibleChallengeFrame
+                  ? "challenge_frame"
+                  : textChallenge
+                    ? "challenge_text"
+                    : challengeFrame
+                      ? "challenge_frame_hidden"
+                      : null,
+              challengeUrl:
+                challengeUrl ||
+                visibleChallengeFrame?.src ||
+                challengeFrame?.src ||
+                null,
+            };
+          })()`,
+          true,
+        ),
+        4_000,
+        "检测抖音真人验证超时",
+      );
+      return {
+        required: Boolean(result?.required),
+        available: Boolean(result?.available),
+        reason: result?.reason ?? null,
+        challengeUrl: result?.challengeUrl ?? null,
+      };
+    } catch {
+      return {
+        required: false,
+        available: false,
+        reason: null,
+        challengeUrl: null,
+      };
+    }
+  }
+
+  isVerificationWindowOpen() {
+    if (!this.catalogPagePromise) return false;
+    return this.catalogPagePromise
+      .then(
+        ({ window }) =>
+          !window.isDestroyed() && window.isVisible(),
+        () => false,
+      );
+  }
+
+  async openVerificationWindow(creator, { force = false } = {}) {
+    if (!creator?.secUid) {
+      return { completed: false, verificationRequired: true };
+    }
+    if (this.verificationPromise) {
+      const page = await this.catalogPagePromise?.catch(() => null);
+      if (page?.window && !page.window.isDestroyed()) {
+        page.window.show();
+        page.window.focus();
+      }
+      return this.verificationPromise;
+    }
+
+    const pageContext = await this.getCatalogPage(creator);
+    const { window } = pageContext;
+    const initialStatus = await this.detectHumanVerification(pageContext);
+    if (!initialStatus.required && !force) {
+      return { completed: true, verificationRequired: false };
+    }
+
+    window.setMinimumSize(760, 620);
+    window.setTitle("完成抖音真人验证 · VibeCoder 加油站");
+    window.show();
+    window.focus();
+
+    const promise = new Promise((resolve) => {
+      let settled = false;
+      let clearChecks = 0;
+      let checking = false;
+      let challengeSeen = initialStatus.required;
+      const finish = (completed) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(statusTimer);
+        window.removeListener("closed", onClosed);
+        if (completed && !window.isDestroyed()) window.hide();
+        resolve({
+          completed,
+          verificationRequired: !completed,
+        });
+      };
+      const onClosed = () => finish(false);
+      const check = async () => {
+        if (checking) return;
+        if (window.isDestroyed()) {
+          finish(false);
+          return;
+        }
+        checking = true;
+        try {
+          const status = await this.detectHumanVerification(pageContext);
+          if (status.required) {
+            challengeSeen = true;
+            clearChecks = 0;
+          } else if (challengeSeen) {
+            clearChecks += 1;
+            if (clearChecks >= 2) finish(true);
+          }
+        } finally {
+          checking = false;
+        }
+      };
+      const statusTimer = setInterval(check, 1_000);
+      window.once("closed", onClosed);
+      statusTimer.unref();
+    });
+    this.verificationPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.verificationPromise === promise) {
+        this.verificationPromise = null;
+      }
+    }
   }
 
   async isAuthenticated() {
@@ -758,6 +949,20 @@ class DouyinLocalSource {
         );
 
         if (responsePage.error) {
+          const verification =
+            await this.detectHumanVerification({ window });
+          if (verification.required) {
+            throw new DouyinCatalogRequestError(
+              "抖音需要先完成人机验证",
+              {
+                errorKind: "human_verification",
+                httpStatus: responsePage.httpStatus,
+                throttled: true,
+                verificationRequired: true,
+                verificationAvailable: true,
+              },
+            );
+          }
           if (responsePage.loginRequired) {
             throw new DouyinLoginRequiredError(
               creator.name ?? creator.secUid,
@@ -769,6 +974,7 @@ class DouyinLocalSource {
             httpStatus: responsePage.httpStatus,
             retryAfterMs: responsePage.retryAfterMs,
             throttled: responsePage.throttled,
+            verificationAvailable: verification.available,
           });
         }
         loginRequired ||= responsePage.loginRequired;
@@ -865,6 +1071,25 @@ class DouyinLocalSource {
       await wait(1_000);
     }
 
+    const verification =
+      await this.detectHumanVerification(pageContext);
+    if (verification.required) {
+      return {
+        creator,
+        videos: catalogResult([]),
+        error: "抖音需要先完成人机验证",
+        errorKind: "human_verification",
+        httpStatus: null,
+        retryAfterMs: null,
+        attempted: true,
+        loginRequired: false,
+        throttled: true,
+        verificationRequired: true,
+        verificationAvailable: true,
+        transport: "profile_page",
+      };
+    }
+
     const pageResult = await withTimeout(
       window.webContents.executeJavaScript(
         `(() => {
@@ -927,6 +1152,7 @@ class DouyinLocalSource {
         attempted: true,
         loginRequired: false,
         throttled: true,
+        verificationAvailable: verification.available,
         transport: "profile_page",
       };
     }
@@ -962,6 +1188,10 @@ class DouyinLocalSource {
           attempted: false,
           loginRequired: false,
           throttled: true,
+          verificationRequired:
+            Boolean(throttledResult.verificationRequired),
+          verificationAvailable:
+            Boolean(throttledResult.verificationAvailable),
           transport: "profile_page",
         });
         continue;
@@ -989,6 +1219,9 @@ class DouyinLocalSource {
           attempted: true,
           loginRequired: false,
           throttled: true,
+          verificationRequired: Boolean(error?.verificationRequired),
+          verificationAvailable:
+            Boolean(error?.verificationAvailable),
           transport: "profile_page",
         };
         results.push(result);
@@ -1232,6 +1465,25 @@ class DouyinLocalSource {
         "批量读取抖音博主作品超时",
       );
 
+      const verification =
+        await this.detectHumanVerification(pageContext);
+      if (verification.required) {
+        return validCreators.map((creator, index) => ({
+          creator,
+          videos: catalogResult([]),
+          error: "抖音需要先完成人机验证",
+          errorKind: "human_verification",
+          httpStatus: null,
+          retryAfterMs: null,
+          attempted: index === 0,
+          loginRequired: false,
+          throttled: true,
+          verificationRequired: true,
+          verificationAvailable: true,
+          transport: "profile_page",
+        }));
+      }
+
       const apiResults = validCreators.map((creator, index) => {
         const page = responsePages[index] ?? {};
         if (page.error) {
@@ -1249,6 +1501,8 @@ class DouyinLocalSource {
             attempted: page.attempted !== false,
             loginRequired: Boolean(page.loginRequired),
             throttled: Boolean(page.throttled),
+            verificationRequired: false,
+            verificationAvailable: verification.available,
           };
         }
 
@@ -1301,6 +1555,8 @@ class DouyinLocalSource {
               suspiciousEmpty ||
               (apiStatusError && !page.loginRequired),
           ),
+          verificationRequired: false,
+          verificationAvailable: verification.available,
         };
       });
       if (apiResults.some((result) => result.throttled)) {
@@ -1320,6 +1576,7 @@ class DouyinLocalSource {
       this.loginWindow.destroy();
     }
     this.loginWindow = null;
+    this.verificationPromise = null;
     this.catalogPagePromise = null;
     for (const window of this.windows) {
       if (!window.isDestroyed()) window.destroy();

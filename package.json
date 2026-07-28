@@ -29,6 +29,8 @@
     "test:ordering": "node electron/local-douyin-ordering-smoke.cjs",
     "test:rate-limit": "node electron/local-douyin-rate-limit-smoke.cjs",
     "test:scaling": "node electron/local-douyin-scaling-smoke.cjs",
+    "test:verification": "node electron/local-douyin-verification-smoke.cjs",
+    "test:verification-page": "electron electron/douyin-verification-page-smoke.cjs",
     "test:manager-window": "node scripts/manager-window-e2e.mjs",
     "test:plugins": "node electron/plugin-system/plugin-host-smoke.cjs",
     "test:transport": "electron electron/transport-smoke.cjs",

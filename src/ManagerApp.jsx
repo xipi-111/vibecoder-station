@@ -4,6 +4,7 @@ import {
   DownloadSimple,
   Package,
   Plus,
+  ShieldCheck,
   SignIn,
   SpinnerGap,
   Trash,
@@ -171,6 +172,8 @@ export function ManagerApp() {
   const authenticated = Boolean(status?.authenticated);
   const refreshing = Boolean(status?.refreshing || collectionBusy);
   const throttled = Boolean(status?.throttled);
+  const verificationRequired = Boolean(status?.verificationRequired);
+  const verificationAvailable = Boolean(status?.verificationAvailable);
   const retryMinutes = Math.max(
     1,
     Math.ceil((Number(status?.retryInMs) || 0) / 60_000),
@@ -185,6 +188,23 @@ export function ManagerApp() {
   const collectionLabel = pluginUi.collectionLabel ?? "集合";
   const collectionPluralLabel =
     pluginUi.collectionPluralLabel ?? collectionLabel;
+  const canCheckVerification = verificationAvailable && throttled;
+  const authenticationActionVisible =
+    selectedPlugin?.capabilities?.authentication &&
+    (verificationRequired ||
+      canCheckVerification ||
+      (status?.authRequired && !authenticated));
+  const authenticationActionLabel = loginBusy
+    ? verificationRequired
+      ? "等待验证"
+      : canCheckVerification
+        ? "等待检查"
+        : "等待登录"
+    : verificationRequired
+      ? pluginUi.verificationActionLabel ?? "打开验证"
+      : canCheckVerification
+        ? pluginUi.verificationCheckActionLabel ?? "检查验证"
+        : pluginUi.loginActionLabel ?? "登录";
 
   return (
     <main className="manager-shell">
@@ -267,10 +287,16 @@ export function ManagerApp() {
             <div className="manager-status-row">
               <div
                 className={`manager-status ${
-                  authenticated ? "manager-status-authenticated" : ""
+                  verificationRequired || throttled
+                    ? "manager-status-verification"
+                    : authenticated
+                      ? "manager-status-authenticated"
+                      : ""
                 }`}
               >
-                {refreshing ? (
+                {verificationRequired || throttled ? (
+                  <ShieldCheck size={18} weight="fill" />
+                ) : refreshing ? (
                   <SpinnerGap className="status-spinner" size={18} />
                 ) : authenticated ? (
                   <CheckCircle size={18} weight="fill" />
@@ -278,7 +304,10 @@ export function ManagerApp() {
                   <SignIn size={18} />
                 )}
                 <span>
-                  {refreshing
+                  {verificationRequired
+                    ? pluginUi.verificationStatusLabel ??
+                      "需要完成人机验证"
+                    : refreshing
                     ? syncingLabel
                     : throttled
                       ? `抖音限流，约 ${retryMinutes} 分钟后重试`
@@ -288,18 +317,14 @@ export function ManagerApp() {
                 </span>
               </div>
 
-              {selectedPlugin.capabilities?.authentication &&
-              status?.authRequired &&
-              !authenticated ? (
+              {authenticationActionVisible ? (
                 <button
                   className="manager-login"
                   type="button"
                   disabled={loginBusy}
                   onClick={loginPlugin}
                 >
-                  {loginBusy
-                    ? "等待登录"
-                    : pluginUi.loginActionLabel ?? "登录"}
+                  {authenticationActionLabel}
                 </button>
               ) : null}
             </div>

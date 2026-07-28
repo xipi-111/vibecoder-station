@@ -23,6 +23,7 @@ When implementing from a selected generated mock, treat that image as the source
 - The built-in Douyin source may use an app-owned persistent session. Never import, inspect, or copy the user's Chrome cookies.
 - Treat a creator catalog as complete only after pagination returns `has_more=false`. Guest-mode partial results may play, but the hover-only login action must clearly unlock the complete catalog.
 - Persist Douyin catalog throttling and retry deadlines across app restarts. When the unsigned catalog endpoint returns a blocked or empty response, switch to the signed, logged-in creator profile page as the durable latest-work transport instead of repeatedly retrying the blocked endpoint.
+- When a source platform presents an explicit human-verification challenge, pause catalog requests and let the plugin reveal its existing isolated catalog window. Resume from the persisted creator cursor after verification succeeds; do not treat a challenge as a timed retry or open it in the player renderer.
 - Treat Douyin image posts as first-class works: play their original soundtrack while advancing through the images, using the same controls and two-surface transition as videos.
 - In creator management, show the total work count alongside the creator count so catalog growth is visible without adding permanent player chrome.
 - Creator management lives in a separate, single-instance, draggable and resizable utility window. It remembers its bounds, does not cover or interrupt playback, and closing it hides only that utility window.

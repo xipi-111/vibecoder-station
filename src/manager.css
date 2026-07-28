@@ -252,6 +252,10 @@ button {
   color: #9bd8ad;
 }
 
+.manager-status-verification {
+  color: #ffd27a;
+}
+
 .status-spinner {
   animation: status-spin 900ms linear infinite;
 }
