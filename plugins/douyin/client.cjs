@@ -788,12 +788,12 @@ class LocalDouyinClient {
       })
       .catch((error) => {
         console.warn(
-          "[douyin-queue] 无法打开真人验证窗口",
+          "[douyin-queue] 无法打开抖音检查或验证窗口",
           error?.message ?? error,
         );
         return {
           completed: false,
-          verificationRequired: true,
+          verificationRequired: !force,
         };
       });
     this.verificationPromise = promise;
@@ -808,6 +808,8 @@ class LocalDouyinClient {
   async getStatus() {
     const retryInMs = this.rateLimitDelayRemaining();
     const rateLimit = normalizeRateLimitState(this.state.rateLimit);
+    const sourceWindowOpen =
+      (await this.source.isVerificationWindowOpen?.()) ?? false;
     return {
       authRequired: this.authRequired,
       authenticated: await this.source.isAuthenticated(),
@@ -816,8 +818,10 @@ class LocalDouyinClient {
         retryInMs > 0 || rateLimit.verificationRequired,
       verificationRequired: rateLimit.verificationRequired,
       verificationAvailable: rateLimit.verificationAvailable,
-      verificationWindowOpen:
-        (await this.source.isVerificationWindowOpen?.()) ?? false,
+      verificationWindowOpen: sourceWindowOpen,
+      sourceWindowOpen,
+      inspectionAvailable:
+        typeof this.source.openVerificationWindow === "function",
       retryAt: retryInMs > 0 ? rateLimit.nextRetryAt : null,
       retryInMs,
       lastAttemptAt: rateLimit.lastAttemptAt,
@@ -849,10 +853,7 @@ class LocalDouyinClient {
       await this.beginHumanVerification();
       return this.getStatus();
     }
-    if (
-      this.state.rateLimit?.verificationAvailable &&
-      this.rateLimitDelayRemaining() > 0
-    ) {
+    if (this.rateLimitDelayRemaining() > 0) {
       await this.beginHumanVerification(null, { force: true });
       return this.getStatus();
     }

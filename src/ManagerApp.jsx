@@ -174,6 +174,9 @@ export function ManagerApp() {
   const throttled = Boolean(status?.throttled);
   const verificationRequired = Boolean(status?.verificationRequired);
   const verificationAvailable = Boolean(status?.verificationAvailable);
+  const sourceWindowOpen = Boolean(
+    status?.sourceWindowOpen ?? status?.verificationWindowOpen,
+  );
   const retryMinutes = Math.max(
     1,
     Math.ceil((Number(status?.retryInMs) || 0) / 60_000),
@@ -188,22 +191,29 @@ export function ManagerApp() {
   const collectionLabel = pluginUi.collectionLabel ?? "集合";
   const collectionPluralLabel =
     pluginUi.collectionPluralLabel ?? collectionLabel;
-  const canCheckVerification = verificationAvailable && throttled;
+  const canInspectSource =
+    throttled &&
+    !verificationRequired &&
+    Boolean(status?.inspectionAvailable ?? verificationAvailable);
   const authenticationActionVisible =
     selectedPlugin?.capabilities?.authentication &&
     (verificationRequired ||
-      canCheckVerification ||
+      canInspectSource ||
       (status?.authRequired && !authenticated));
   const authenticationActionLabel = loginBusy
     ? verificationRequired
       ? "等待验证"
-      : canCheckVerification
-        ? "等待检查"
+      : canInspectSource
+        ? "正在打开"
         : "等待登录"
     : verificationRequired
       ? pluginUi.verificationActionLabel ?? "打开验证"
-      : canCheckVerification
-        ? pluginUi.verificationCheckActionLabel ?? "检查验证"
+      : canInspectSource
+        ? sourceWindowOpen
+          ? pluginUi.inspectionReturnActionLabel ?? "返回抖音窗口"
+          : pluginUi.inspectionActionLabel ??
+            pluginUi.verificationCheckActionLabel ??
+            "打开抖音检查"
         : pluginUi.loginActionLabel ?? "登录";
 
   return (

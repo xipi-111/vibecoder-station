@@ -60,12 +60,34 @@ async function main() {
       throw new Error("普通页面被误判为真人验证");
     }
 
+    await page.window.loadURL(
+      "data:text/html;charset=utf-8," +
+        encodeURIComponent(`
+          <div>
+            <div id="service-error">
+              服务异常，重新
+              <span onclick="this.parentElement.remove()">刷新</span>
+              拉取数据
+            </div>
+          </div>
+        `),
+    );
+    const recovery = await source.recoverCatalogServiceError(page);
+    const serviceErrorVisible =
+      await page.window.webContents.executeJavaScript(
+        `Boolean(document.querySelector("#service-error"))`,
+      );
+    if (!recovery.refreshed || serviceErrorVisible) {
+      throw new Error("没有自动恢复抖音页面内的临时服务异常");
+    }
+
     console.log(
       JSON.stringify({
         result: "passed",
         detectedChallengeFrame: true,
         ignoredHiddenPreload: true,
         ignoredOrdinaryPage: true,
+        recoveredServiceError: true,
       }),
     );
   } finally {

@@ -2,7 +2,7 @@
   "apiVersion": 1,
   "id": "com.vibecoder.douyin",
   "name": "抖音内容源",
-  "version": "0.1.7",
+  "version": "0.1.9",
   "description": "从用户配置的抖音博主中同步作品并提供连续播放。",
   "main": "main.cjs",
   "capabilities": {
@@ -22,6 +22,7 @@
     "loginActionLabel": "登录抖音",
     "verificationStatusLabel": "需要完成抖音真人验证",
     "verificationActionLabel": "打开验证",
-    "verificationCheckActionLabel": "检查验证"
+    "inspectionActionLabel": "打开抖音检查",
+    "inspectionReturnActionLabel": "返回抖音窗口"
   }
 }

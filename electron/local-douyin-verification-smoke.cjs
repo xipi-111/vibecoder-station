@@ -146,7 +146,6 @@ async function main() {
     const manualDirectory = path.join(testDirectory, "manual-check");
     let manualBatchCalls = 0;
     let manualWindowOpenCount = 0;
-    let closeManualWindow;
     const manualSource = {
       isAuthenticated: async () => true,
       isVerificationWindowOpen: async () => manualWindowOpenCount > 0,
@@ -171,10 +170,11 @@ async function main() {
           throw new Error("隐藏验证模块必须通过手动检查打开");
         }
         manualWindowOpenCount += 1;
-        await new Promise((resolve) => {
-          closeManualWindow = resolve;
-        });
-        return { completed: false, verificationRequired: false };
+        return {
+          completed: false,
+          verificationRequired: false,
+          inspectionOpened: true,
+        };
       },
     };
     const manualClient = new LocalDouyinClient({
@@ -195,26 +195,23 @@ async function main() {
       !manualStatus.throttled ||
       manualStatus.verificationRequired ||
       !manualStatus.verificationAvailable ||
+      !manualStatus.inspectionAvailable ||
       manualWindowOpenCount !== 0
     ) {
       throw new Error("隐藏验证模块被误报成可见挑战或自动弹出");
     }
 
-    const manualAction = manualClient.login();
-    await waitUntil(
-      () => manualWindowOpenCount === 1,
-      "检查验证操作没有打开共享目录窗口",
-    );
-    closeManualWindow();
-    await manualAction;
+    await manualClient.login();
     const afterManualCheck = await manualClient.getStatus();
     if (
       manualBatchCalls !== 1 ||
+      manualWindowOpenCount !== 1 ||
       !afterManualCheck.throttled ||
       afterManualCheck.verificationRequired ||
-      !afterManualCheck.verificationAvailable
+      !afterManualCheck.verificationAvailable ||
+      !afterManualCheck.sourceWindowOpen
     ) {
-      throw new Error("关闭检查窗口后不应清除普通限流退避");
+      throw new Error("打开抖音检查不应等待或清除普通限流退避");
     }
     manualClient.stopPolling();
 
@@ -222,7 +219,7 @@ async function main() {
       JSON.stringify({
         result: "passed",
         autoOpened: true,
-        manualCheck: true,
+        manualInspection: true,
         persistedPause: true,
         resumedCursor: resumedState.refreshCursor,
       }),

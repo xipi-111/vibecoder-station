@@ -518,6 +518,70 @@ class DouyinLocalSource {
     }
   }
 
+  async recoverCatalogServiceError(pageContext) {
+    const window = pageContext?.window;
+    if (!window || window.isDestroyed()) {
+      return { found: false, refreshed: false };
+    }
+
+    try {
+      const result = await withTimeout(
+        window.webContents.executeJavaScript(
+          `(() => {
+            const isVisible = (element) => {
+              const style = getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return (
+                style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                Number(style.opacity || 1) > 0 &&
+                rect.width > 0 &&
+                rect.height > 0
+              );
+            };
+            const serviceError = [...document.querySelectorAll("div, p")]
+              .filter((element) => {
+                const text = (element.textContent || "").trim();
+                return (
+                  isVisible(element) &&
+                  /服务异常/.test(text) &&
+                  /刷新/.test(text)
+                );
+              })
+              .sort(
+                (left, right) =>
+                  left.textContent.trim().length -
+                  right.textContent.trim().length,
+              )[0];
+            if (!serviceError) {
+              return { found: false, refreshed: false };
+            }
+            const refreshControl = [
+              ...serviceError.querySelectorAll(
+                'button, [role="button"], a, span',
+              ),
+            ].find(
+              (element) =>
+                isVisible(element) &&
+                (element.textContent || "").trim() === "刷新",
+            );
+            (refreshControl || serviceError).click();
+            return { found: true, refreshed: true };
+          })()`,
+          true,
+        ),
+        4_000,
+        "恢复抖音服务异常页面超时",
+      );
+      return {
+        found: Boolean(result?.found),
+        refreshed: Boolean(result?.refreshed),
+      };
+    } catch {
+      return { found: false, refreshed: false };
+    }
+  }
+
   isVerificationWindowOpen() {
     if (!this.catalogPagePromise) return false;
     return this.catalogPagePromise
@@ -543,7 +607,42 @@ class DouyinLocalSource {
 
     const pageContext = await this.getCatalogPage(creator);
     const { window } = pageContext;
-    const initialStatus = await this.detectHumanVerification(pageContext);
+    let initialStatus = await this.detectHumanVerification(pageContext);
+    if (!initialStatus.required && force) {
+      if (
+        !window.isVisible() &&
+        !window.webContents.getURL().includes(creator.secUid)
+      ) {
+        await Promise.race([
+          window
+            .loadURL(
+              `https://www.douyin.com/user/${encodeURIComponent(
+                creator.secUid,
+              )}`,
+              { userAgent: pageContext.userAgent },
+            )
+            .catch(() => undefined),
+          wait(20_000),
+        ]);
+        await wait(CATALOG_SESSION_WARMUP_MS);
+        initialStatus =
+          await this.detectHumanVerification(pageContext);
+      }
+      if (!initialStatus.required) {
+        const recovery =
+          await this.recoverCatalogServiceError(pageContext);
+        if (recovery.refreshed) await wait(800);
+        window.setMinimumSize(760, 620);
+        window.setTitle("检查抖音状态 · VibeCoder 加油站");
+        window.show();
+        window.focus();
+        return {
+          completed: false,
+          verificationRequired: false,
+          inspectionOpened: true,
+        };
+      }
+    }
     if (!initialStatus.required && !force) {
       return { completed: true, verificationRequired: false };
     }
@@ -1089,6 +1188,9 @@ class DouyinLocalSource {
         transport: "profile_page",
       };
     }
+    const recovery =
+      await this.recoverCatalogServiceError(pageContext);
+    if (recovery.refreshed) await wait(800);
 
     const pageResult = await withTimeout(
       window.webContents.executeJavaScript(
